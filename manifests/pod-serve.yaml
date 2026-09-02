@@ -1,0 +1,221 @@
+# Mode B -- production-like shape.
+#
+# vLLM is the container's entrypoint (wrapped by coldstart-run.sh so the probe
+# is staged and the readiness edges are recorded), and a readinessProbe gates
+# traffic the way it would in a real deployment. Use this to answer questions
+# that depend on the container's own lifecycle -- "does our readinessProbe let
+# traffic in before vLLM can answer it?" -- and Mode A for repeated
+# measurements of the process itself.
+#
+# The measured t0 is still vLLM's own exec time, so numbers remain comparable
+# with Mode A; the pod's own start-up is visible only as the gap between the
+# pod's start time and t0, which the report does not count.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-coldstart-serve
+  labels:
+    app.kubernetes.io/part-of: llm-d-cold-start
+    app.kubernetes.io/component: serve
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 60
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai:latest
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/bash", "/opt/coldstart-src/coldstart-run.sh"]
+      args:
+        - --run-id
+        - serve
+        - --repeat
+        - "1"
+        - --timeout
+        - "1800"
+        - --
+        # Replace with the model under test. Anything after `--` is passed
+        # straight to `vllm serve`.
+        - --model
+        - Qwen/Qwen2.5-1.5B-Instruct
+        - --max-model-len
+        - "4096"
+      ports:
+        - name: http
+          containerPort: 8000
+      env:
+        - name: CS_PROBE_SRC
+          value: /opt/coldstart-src
+        - name: CS_OUT_DIR
+          value: /var/log/coldstart
+        - name: HOME
+          value: /cache/home
+        - name: HF_HOME
+          value: /cache/hf
+        - name: HF_HUB_CACHE
+          value: /cache/hf/hub
+        - name: XDG_CACHE_HOME
+          value: /cache/xdg
+        - name: VLLM_CACHE_ROOT
+          value: /cache/vllm
+        - name: TORCHINDUCTOR_CACHE_DIR
+          value: /cache/inductor
+        - name: TRITON_CACHE_DIR
+          value: /cache/triton
+        - name: FLASHINFER_CACHE_DIR
+          value: /cache/flashinfer
+        # Older FlashInfer reads FLASHINFER_WORKSPACE_BASE instead; set both so
+        # the cache lands on the PVC whichever release the image ships.
+        - name: FLASHINFER_WORKSPACE_BASE
+          value: /cache/flashinfer
+        # Persist the memory-profiling result (the suggested --kv-cache-memory
+        # value and the free-memory baseline) under $VLLM_CACHE_ROOT/startup_plan/,
+        # keyed by a hardware+config fingerprint; later boots skip memory
+        # profiling when the fingerprint matches and free memory is >= the
+        # recorded baseline. Measured on 20260901-191644: r1 wrote
+        # startup_plan_faaa0e6a718763db.json, r2 logged "Applying persisted
+        # startup plan ... Memory profiling will be skipped" and spent 1.37s in
+        # kvcache.determine_memory against r1's 2.01s -- so it is worth ~0.6s,
+        # not the ~1.9s a cold-vs-warm reading suggests: most of the cold
+        # determine_memory cost was the profile forward pass compiling, which
+        # the torch.compile cache already covers. Never pays on the first boot
+        # of a given fingerprint, and only pays at all because the plan lands
+        # under VLLM_CACHE_ROOT on the PVC (which does make it cross-pod).
+        - name: VLLM_ENABLE_STARTUP_PLAN
+          value: "1"
+        # ---- thread sizing --------------------------------------------------
+        # torch/OpenMP size their pools from the *node's* core count, not the
+        # cgroup quota: the traced run reached 193 threads under a 16-core
+        # limit, which is why CPU/wall during imports was 1.42 rather than
+        # ~1.0, and it produced cgroup throttling at only 1.4 cores of real
+        # use. Keep this in step with resources.limits.cpu below.
+        - name: OMP_NUM_THREADS
+          value: "16"
+        # ---- engine start method --------------------------------------------
+        # vllm serve overrides vLLM's own default here: envs.py:68 declares
+        # "fork", but entrypoints/serve/utils/api_utils.py:164 sets "spawn"
+        # whenever the variable is *unset* -- so setting it in the manifest is
+        # what wins. Despite the name, TP=1 uses UniProcExecutor and has no
+        # separate worker processes; what this actually changes is how
+        # EngineCore is created (v1/engine/utils.py:139).
+        #
+        # The prize: a spawned EngineCore is a fresh interpreter that re-imports
+        # the entire stack. On 20260901-191644-r2 it exec'd at t+20.0s and did
+        # not reach engine.core_proc_init until t+35.5s -- 15.5s, 28% of a 55.3s
+        # run, spent importing torch and vllm a second time. A forked child
+        # inherits them already loaded.
+        #
+        # The risk: the failure mode is a hang, not a crash. By fork time the
+        # parent has imported torch and is multi-threaded, and Python 3.12 (this
+        # image) warns that fork() in a multi-threaded process can deadlock the
+        # child if any thread held a lock. vLLM force-reverts to spawn if CUDA
+        # is already initialised in the parent (system_utils.py
+        # _maybe_force_spawn), so the win can also disappear silently on a
+        # version bump with no error -- check the trace, not the config. Unusable
+        # with Ray, --numa-bind or WSL (all force spawn) and with multimodal
+        # mm_tensor_ipc=torch_shm (hard error); Whisper warns about forked-worker
+        # hangs. Python 3.14 moves the Linux default to forkserver, so treat this
+        # as a measured shortcut with a shelf life.
+        #
+        # Do not set "forkserver" here -- not because it is the wrong idea but
+        # because the value cannot work: api_server.py:108 has a branch for it,
+        # yet envs.py:937 restricts the variable to spawn/fork, so
+        # get_mp_context() raises ValueError and the feature dies right after
+        # configuring itself. Use CS_FORKSERVER=1 instead
+        # (coldstart/cs_forkserver.py), which hands get_mp_context a forkserver
+        # context directly and arms the preload at t~0 so it overlaps this
+        # process's own imports rather than blocking the first fork. Leave this
+        # variable at "fork" for the baseline arm: if the probe declines -- CUDA
+        # already initialised, Ray, --numa-bind, WSL -- the run then falls back
+        # to a start method we have a number for, and forkserver.summary in the
+        # trace says it happened.
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: "fork"
+        - name: VLLM_NO_USAGE_STATS
+          value: "1"
+        - name: DO_NOT_TRACK
+          value: "1"
+        # ---- why HF offline mode is deliberately NOT set --------------------
+        # Offline mode looks free: the weights are already on the PVC, so
+        # skipping the hub round trips (574ms on the warm run) should be pure
+        # win. It is not. vllm/engine/arg_utils.py:808 rewrites --model from the
+        # repo id to the resolved snapshot directory whenever offline mode is on
+        #   arg_utils.py:813 HF_HUB_OFFLINE is True, replace model_id
+        #   [Qwen/Qwen2.5-1.5B-Instruct] to model_path [/cache/hf/hub/
+        #   models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa798...]
+        # and that string is part of vLLM's torch.compile cache key, so the AOT
+        # artifact cached under the repo id is never found. Run 20260901-185341
+        # recompiled from scratch (compilation n=3/260ms -> n=91/12.5s,
+        # kvcache.determine_memory 1.85s -> 12.9s) and took 65.7s against 53.0s
+        # for the same warm PVC with these unset -- to buy back 574ms.
+        # Both names matter: huggingface_hub derives HF_HUB_OFFLINE from either
+        # variable (constants.py: _is_true(HF_HUB_OFFLINE or
+        # TRANSFORMERS_OFFLINE)), so setting only TRANSFORMERS_OFFLINE triggers
+        # the same rewrite. A path-keyed compile cache is also the wrong shape
+        # for llm-d: the key then embeds the snapshot commit and the mount
+        # point, so it stops being shareable across pods that mount the cache
+        # elsewhere or re-resolve the model to a new snapshot dir.
+        # - name: HF_HUB_OFFLINE
+        #   value: "1"
+        # - name: TRANSFORMERS_OFFLINE
+        #   value: "1"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+              optional: true
+      # httpGet on /health, *not* a tcpSocket probe: vLLM binds the port well
+      # before the engine can answer, and the report will tell you exactly how
+      # many seconds of false-ready a tcpSocket probe would have granted.
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 2
+        timeoutSeconds: 2
+        failureThreshold: 900     # allow a long, honest cold start
+      startupProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 2
+        failureThreshold: 900
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+          cpu: "16"
+          memory: 128Gi
+        requests:
+          nvidia.com/gpu: "1"
+          cpu: "16"
+          memory: 128Gi
+      volumeMounts:
+        - name: probe
+          mountPath: /opt/coldstart-src
+          readOnly: true
+        - name: cache
+          mountPath: /cache
+        - name: traces
+          mountPath: /var/log/coldstart
+        - name: shm
+          mountPath: /dev/shm
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+  volumes:
+    - name: probe
+      configMap:
+        name: coldstart-probe
+        defaultMode: 0555
+    - name: cache
+      persistentVolumeClaim:
+        claimName: coldstart-cache
+    - name: traces
+      emptyDir: {}
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi

@@ -1,0 +1,8 @@
+.selftest/
+runs/
+manifests/generated/
+manifests/hf-token-secret.yaml
+__pycache__/
+*.pyc
+.envrc
+.vscode

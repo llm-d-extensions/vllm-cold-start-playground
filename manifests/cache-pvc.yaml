@@ -1,0 +1,25 @@
+# Shared, writable cache volume.
+#
+# Cold start is mostly a story about what is *not* cached, so the cache has to
+# be a first-class, explicitly controlled object: HF weights live here, and so
+# do the Inductor/Triton/vLLM compile caches whose presence or absence swings
+# time-to-ready by tens of seconds. Keeping it on a PVC lets an experiment say
+# "warm weights, cold compile cache" and mean it.
+#
+# Size it for the models under test: a 70B fp16 checkpoint is ~140 GiB, and the
+# compile caches add a few hundred MiB per (model, TP, GPU, vLLM version).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: coldstart-cache
+  labels:
+    app.kubernetes.io/part-of: llm-d-cold-start
+spec:
+  accessModes:
+    - ReadWriteOnce        # RWX if several experiment pods must share it
+  resources:
+    requests:
+      storage: 200Gi
+  # storageClassName: <fast-local-or-nvme-class>   # set this: the storage tier
+                                                   # is one of the variables
+                                                   # under measurement
