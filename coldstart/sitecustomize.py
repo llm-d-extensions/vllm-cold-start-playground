@@ -122,6 +122,11 @@ def _install():
     import cs_forkserver
     step("forkserver", cs_forkserver.install)
 
+    # Opt-in twice over (CS_FST=1); sizes the unreachable fastsafetensors
+    # parameters for an upstream change. See coldstart/cs_fst.py.
+    import cs_fst
+    step("fst", cs_fst.install)
+
     import cs_env
     step("env", cs_env.capture)
     step("proctitle", cs_env.install_title_probe)

@@ -36,6 +36,7 @@ change moves a phase it should not, that is the interesting result.
 | **tensor parallelism** | `--tensor-parallel-size 2,4,8` | `ipc handshake`, `device & collectives init`, `python imports` (once per worker) |
 | **CPU budget** | change the pod's cpu limit/request | `python imports`, `weight load`, `torch.compile`; watch the throttling finding |
 | **storage tier** | PVC `storageClassName` (NVMe / network / object-store cache) | `weight load` throughput |
+| **weight loader** | `--load-format fastsafetensors` | `weight load` — −12.4s at 32B; check the progress-bar string, not the flag |
 | **`/dev/shm` size** | shrink it below what TP needs | `ipc handshake` — this is a classic silent stall |
 | **vLLM version** | pinned image digest | anything; version is one of the strongest determinants |
 | **model size / dtype** | `--model`, `--dtype` | `weight load` roughly linearly; compile time much less so |
@@ -506,6 +507,160 @@ deferring an import can save, often a wildly loose one.** Before writing a lazy
 import, check that the module count actually drops. If it drops by one, there is
 nothing to win, however large the attributed time.
 
+## `fastsafetensors` is worth 12.4s at 32B, and every knob on it is not
+
+`weight load` was 47% of a 32B cold start — the largest single phase once
+bytecode caching had taken the imports down. `--load-format fastsafetensors`
+(fastsafetensors 0.3.3, shipped in the upstream image) is a one-flag change and
+it is the largest single win this harness has measured on a phase other than
+imports.
+
+Qwen/Qwen3-32B, 61.02 GiB in 17 shards on a GPFS PVC, `--max-model-len 8192`,
+`VLLM_WORKER_MULTIPROC_METHOD=fork`, `PYTHONPYCACHEPREFIX=/cache/pycache`, arms
+interleaved A,B,A,B,… after one discarded warm-up, n=3:
+
+| arm | median total | the three runs | vLLM's `Loading weights took` |
+|---|---|---|---|
+| `--load-format auto` | 59.85s | 57.74 / 59.85 / 94.16 | 28.84s |
+| `--load-format fastsafetensors` | **47.49s** | 46.58 / 47.49 / 48.58 | **16.19s** |
+
+**−12.36s (−20.6%).** Effective throughput on the same files goes 2.12 → 3.77
+GiB/s.
+
+What makes this a result rather than a total is that two independent measurement
+paths agree: the probe's phase attribution puts `weight load` at 30.30 → 17.60s
+(**−12.70s**) and vLLM's own in-engine timer puts it at 28.84 → 16.19s
+(−12.65s). Those instruments share no code. Nothing else moved — imports
+−0.10s, warmup +0.00s, orchestration +0.00s, kv cache −0.02s, compile and
+cudagraph ~0.
+
+The arm is verified as actually engaged, not merely requested: `load_format=
+fastsafetensors` in the engine config line, and a **different progress-bar
+string** — `Loading fastsafetensors checkpoint shards` at 1.18 it/s against
+`Loading safetensors checkpoint shards` at 1.69 s/it, a 2.0× shard rate. Check
+the bar, not the flag: run-ids in this tree named `q32-fs-*` are the *forkserver*
+arm and load plain safetensors.
+
+Quote the range, not just the median. The baseline's 94.16s run was a **62.00s**
+weight load against 26.52s and 28.84s for the other two, with compile time a
+normal 0.22s throughout — the same code reading the same files varies 2.3× with
+cache state. `fastsafetensors` was far tighter (16.07 / 16.19 / 16.69s), which is
+itself part of the finding.
+
+### Storage was never the bottleneck; read concurrency was
+
+The tempting reading — 47% of the wall on a network filesystem, therefore
+I/O-bound — is wrong, and measuring the device settles it. `O_DIRECT` reads of
+the same 61.02 GiB, bypassing the page cache (the node has ~2 TiB RAM and will
+happily cache the entire model, flattering any buffered benchmark):
+
+| threads | 1 | 4 | 8 | 16 |
+|---|---|---|---|---|
+| GPFS, `O_DIRECT` | 1.15 | 4.12 | 7.79 | **9.30 GiB/s** |
+
+9.30 GiB/s is 6.56s for the whole model. Host-to-device is not the limit either:
+51.55 GiB/s from pinned memory, 16.55 pageable. So the baseline loader's 2.12
+GiB/s is **its own read concurrency**, four ways off what the filesystem
+delivers, and `fastsafetensors` recovers part of that by reading with more
+threads.
+
+Two consequences. Staging weights on node-local NVMe is a dead end here — the
+local PVs write at 3.4 GB/s, *slower* than GPFS. And 16.2s still sits against a
+6.6s floor, so ~9.5s remains inside the loader's pipeline, unreachable by any of
+the knobs below.
+
+### Both tunables are null, and one of them is a trap
+
+`VLLM_FASTSAFETENSORS_QUEUE_SIZE` (`envs.py:123`, default 0) is the only
+fastsafetensors parameter vLLM exposes. End to end at 32B, interleaved, n=3:
+
+| arm | median total | weight load |
+|---|---|---|
+| `QUEUE_SIZE=0` | 48.03s (47.13 / 48.03 / 48.45) | 16.08s |
+| `QUEUE_SIZE=2` | 47.51s (46.97 / 47.51 / 47.61) | 15.97s |
+
+**−0.11s on the phase it targets.** `ParallelLoader`'s docstring promises deeper
+pipelining at the cost of `(max_concurrent_producers + queue_size) * file_size`
+of GPU memory; peak GPU stayed flat at 8.8G across queue depths 0–3, i.e. the
+queue never fills. Leave it at the default.
+
+`max_threads` and `bbuf_size_kb` are not reachable at all —
+`fastsafetensors_weights_iterator` (`weight_utils.py:1033-1105`) constructs
+`ParallelLoader` directly and passes neither, and neither appears in
+fastsafetensors' own `LoaderConfig`, so `FASTSAFETENSORS_CONFIG` cannot set them
+on vLLM's path either. Measured by driving `ParallelLoader` directly, they are
+null anyway on the path vLLM takes: 14.05s against the default's 14.10s.
+
+### The one real finding: `nogds` keys on the wrong variable
+
+`weight_utils.py:1043` decides the transfer path with
+
+```python
+nogds = pg.size() > 1
+```
+
+so at TP=1 vLLM asks for GDS. This cluster has none — no `nvidia_fs` module, no
+`/dev/nvidia-fs*`, no `libcufile`, no `cufile.json`,
+`torch.cuda.gds_register_buffer` absent — because the GPU-operator ClusterPolicy
+sets `gds: {enabled: false}`. fastsafetensors degrades internally rather than
+raising, so the `nogds=True` fallback in that function never fires and the cost
+is silent.
+
+Fresh process per config, one load each, arms interleaved over 3 passes — which
+is what a cold start actually does:
+
+| config | cold start (load 1) | in-process repeat (load 2) | per-process setup |
+|---|---|---|---|
+| `nogds=False`, 16 thr, 16384 KiB — **what vLLM does** | **16.57s** | 14.13s | **2.44s** |
+| `nogds=True`, 16 thr, 16384 KiB | **13.97s** | 13.22s | 0.75s |
+| `nogds=True`, 8 thr, 32768 KiB | **12.77s** | 12.01s | 0.76s |
+
+`nogds=True` is worth **−2.60s**, and the decomposition is the point: only 0.91s
+is steady-state throughput (14.13 → 13.22s), while **1.69s is one-time
+per-process setup** — probing for a feature that is not installed, paid afresh by
+every `EngineCore`. This is not a knob to tune; it is a heuristic keying on world
+size when it should key on whether `libcufile`/`nvidia_fs` exist.
+
+With that flipped, `max_threads=8` / `bbuf_size_kb=32768` *does* pay — a further
+−1.20s, having done nothing under `nogds=False`. Full combination **16.57 →
+12.77s (−3.80s)**, projecting 32B total to ~43.7s. All three knobs need a patch;
+none is reachable from the environment.
+
+Upstream, in priority order: condition `nogds` on GDS availability rather than
+`pg.size()`; expose `max_threads` and `bbuf_size_kb`; note that
+`max_threads=16` is counterproductive under a CPU-limited cgroup (16 cores here
+against 224 on the node).
+
+### Two measurement traps this sweep walked into first
+
+Both produced confident, wrong answers before being caught, and both apply to
+every arm in this tree.
+
+**Never measure a loader with in-process repeats.** The first load in a process is
+2.44s slower than later loads on vLLM's path — same process, same files, cache
+long since warm. Only load 1 corresponds to a cold start, and load-1 for the
+default config (16.10 / 16.57 / 16.57s) matches vLLM's own in-engine timer across
+six end-to-end runs (16.06–16.39s), which the warm figures never did. A sweep
+built on in-process repeats understated every knob here by roughly half.
+
+Worse, a sweep that iterates configs over the same files **warms the cache
+monotonically down the matrix**, so improvements alias onto whichever config ran
+last. That artifact produced a −2.50s "win" for `queue_size` and a −3.49s one for
+`nogds` that end-to-end runs then refuted. Interleave configs across passes; do
+not trust `posix_fadvise(POSIX_FADV_DONTNEED)` to fix it, because GPFS serves
+reads from its own pagepool and `/proc/meminfo Cached` neither reflects nor
+controls it — eviction reported 61.0G once and 0.0G on all eleven later calls.
+
+**Any `VLLM_*` env arm pays a one-time recompile.** `compile_factors()`
+(`envs.py:2216`) starts from *every* known vLLM env var and drops only those in
+`ignored_factors` (`:2222`), so 233 vars are part of the torch.compile cache key
+— `VLLM_FASTSAFETENSORS_QUEUE_SIZE` among them. Its first run cost **24.78s of
+compilation** against 0.21-0.22s for every other run in the set, turning a null
+knob into an apparent 72.07s catastrophe. `VLLM_WORKER_MULTIPROC_METHOD` *is* on
+the drop list, which is why the fork/spawn arms never showed this. Discard the
+first run after changing any env var, or measure a 25s regression that is not
+there.
+
 ## Reading the report
 
 `report.txt` is ordered so you can stop as soon as you have your answer.
@@ -587,6 +742,23 @@ Before quoting a number:
   config.
 * **Are you summing import spans?** They are nested and cumulative; summing them
   is meaningless. Use the interval union.
+* **Did you measure a loader with in-process repeats?** The first load in a
+  process is ~2.4s slower than the ones after it, and only the first corresponds
+  to a cold start. One fresh process per config, or the knobs look half as large
+  as they are.
+* **Did the sweep iterate configs over the same files?** Then the cache warmed
+  monotonically down the matrix and the win landed on whichever config ran last.
+  Interleave across passes; `posix_fadvise(DONTNEED)` does not evict GPFS's
+  pagepool, whatever `/proc/meminfo Cached` says.
+* **Did you change a `VLLM_*` env var?** 233 of them are torch.compile cache
+  factors, so the first run pays a full recompile — 24.8s at 32B. Discard it.
+* **Is the pod already setting the variable you think you are testing?**
+  `manifests/pod-exec.yaml` pins `VLLM_WORKER_MULTIPROC_METHOD=fork` (and
+  `VLLM_ENABLE_STARTUP_PLAN=1`) at the container level, so an arm that passes
+  no `--env` is *not* upstream-default — it inherits those. A baseline has to
+  set the default back explicitly (`--env VLLM_WORKER_MULTIPROC_METHOD=spawn`),
+  or the step you are trying to price reads as a no-op. Symptom: two arms whose
+  `python imports` phase is identical to 0.1s.
 * **Did the run-id collide with an earlier run?** `coldstart-run.sh` now refuses
   this, but a directory containing two runs' pid-keyed trace files renders as one
   enormous run without complaint. If a total looks impossible, count the
