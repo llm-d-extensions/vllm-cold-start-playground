@@ -24,6 +24,7 @@ _pending = {}          # module name -> [callback(module), ...]
 _observers = []        # (on_start(name), on_end(name, exc)) pairs
 _installed = False
 _results = []          # (target, status) for coverage reporting
+_declared = []         # every target ever registered, resolved or not
 _busy = threading.local()
 
 
@@ -299,16 +300,17 @@ def patch(module_name, path, name=None, cat="misc", argfn=None,
     """
     label = "%s:%s" % (module_name, path)
     span_name = name or (module_name.split(".")[-1] + "." + path)
+    _declared.append(label)
 
     def _apply(module):
         try:
             owner, attr = _resolve(module, path)
         except Exception:
-            _results.append((label, "missing"))
+            _record(label, "missing")
             return
         orig = getattr(owner, attr, None)
         if orig is None:
-            _results.append((label, "missing"))
+            _record(label, "missing")
             return
         try:
             if isinstance(inspect.getattr_static(owner, attr, None),
@@ -325,11 +327,11 @@ def patch(module_name, path, name=None, cat="misc", argfn=None,
                         wrap_callable(orig, span_name, cat, argfn, min_dur,
                                       kind))
             else:
-                _results.append((label, "not-callable"))
+                _record(label, "not-callable")
                 return
-            _results.append((label, "ok"))
+            _record(label, "ok")
         except Exception as e:
-            _results.append((label, "failed:%s" % type(e).__name__))
+            _record(label, "failed:%s" % type(e).__name__)
             if required:
                 T.tracer.error("patch:" + label, e)
 
@@ -348,8 +350,45 @@ def patch_many(module_name, specs, cat="misc"):
                   kind=s[4])
 
 
+def _record(label, status):
+    """Record a patch result and put it in the trace immediately.
+
+    Emitting at resolution time rather than at exit is what makes coverage
+    trustworthy in a process the probe never gets to summarise -- see
+    :func:`emit_declared`.
+    """
+    _results.append((label, status))
+    try:
+        T.tracer.instant("probe.patch", cat="probe", target=label,
+                         status=status)
+    except Exception:
+        pass
+
+
 def coverage():
     ok = sum(1 for _, s in _results if s == "ok")
     missing = [t for t, s in _results if s != "ok"]
-    pending = sorted(_pending)
+    resolved = set(t for t, _ in _results)
+    pending = sorted(t for t in _declared if t not in resolved)
     return {"applied": ok, "not_applied": missing, "never_imported": pending}
+
+
+def emit_declared():
+    """Write the full target list to the trace at install time.
+
+    Coverage used to be reported only from ``Tracer.at_finish``, which needs the
+    process to die in a way the probe sees. EngineCore does not: vLLM installs
+    its own SIGTERM handler after the probe's and exits past ``atexit``, so
+    ``probe.coverage`` was never written for the one process that owns weight
+    load, graph capture and warmup. Nothing then said that 10.9s of the warmup
+    phase had no probe under it -- the span simply had no children.
+
+    Declared targets are emitted here and each resolution is emitted as it
+    happens, so ``never_imported`` is reconstructible from a truncated trace:
+    declared minus resolved.
+    """
+    try:
+        T.tracer.meta("probe.patch_declared", targets=sorted(_declared),
+                      count=len(_declared))
+    except Exception:
+        pass

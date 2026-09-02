@@ -63,7 +63,7 @@ zero usually means a renamed symbol, not a performance win.
 | `cs_net.py` | DNS, TCP connect, TLS handshake, HTTP requests, HF hub metadata and downloads |
 | `cs_io.py` | which files were opened and how big, plus `stat`/`exists`/`listdir` chatter counts |
 | `cs_torch.py` | CUDA lazy init, collectives init, `torch.compile`/Inductor (cache hit vs miss), Triton JIT, CUDA graph capture |
-| `cs_vllm.py` | 92 patch points across vLLM's startup path: CLI, API server, engine config, tokenizer, EngineCore, executors, workers, model loader, KV cache |
+| `cs_vllm.py` | ~120 patch points across vLLM's startup path: CLI, API server, engine config, tokenizer, EngineCore, executors, workers, model loader, KV cache, kernel warmups, and a hand-written wrapper that splits CUDA graph capture by mode and size |
 | `cs_sampler.py` | background timeseries: CPU, RSS, threads, faults, `/proc/self/io`, netns bytes, cgroup throttling, page cache; NVML per-GPU from one elected process |
 | `cs_env.py` | run context: cgroup limits, filesystem behind each cache, cache sizes, GPU/CPU facts, redacted env snapshot |
 | `cs_ready.py` | the external readiness poller — the only piece that runs *without* the probe |
@@ -118,6 +118,7 @@ All optional; all read once at tracer construction.
 | `CS_GPU_SAMPLE` | on | `0` disables NVML sampling |
 | `CS_MAX_EVENTS` | `200000` | per-process event cap; drops are counted |
 | `CS_MODEL` | unset | model path/id, used for filesystem detection and the first-token request |
+| `CS_CUDAGRAPH_MIN_DUR` | `0` | drop CUDA-graph per-descriptor spans shorter than this many seconds. `0` keeps all ~300 of them, which is what makes the per-mode counts exact |
 | `CS_DEBUG` | unset | print a traceback if installation raises |
 
 The readiness poller has its own: `CS_READY_HOST`, `CS_READY_PORT`,
@@ -128,9 +129,9 @@ The readiness poller has its own: `CS_READY_HOST`, `CS_READY_PORT`,
 Add a row to `PATCHES` in `cs_vllm.py`:
 
 ```python
-("vllm.v1.worker.gpu_model_runner", "GPUModelRunner.capture_model",
+("vllm.v1.worker.gpu.model_runner", "GPUModelRunner.capture_model",
  "cudagraph.capture_model", "cudagraph", None)
-#  module                          qualname          span name      cat   kind
+#  module                            qualname          span name      cat   kind
 
 # `kind` is None for a plain function, or "acm" for something returning an
 # async context manager; async functions and async generators are detected.
@@ -141,7 +142,54 @@ The `cat` decides which phase the span is credited to — see `CAT_PHASE` in
 category. If your new span is a leaf inside an existing container span, check its
 phase priority in `PHASES` so the sweep credits the right one.
 
-Then confirm the plumbing end to end:
+### Two traps that cost us 10.9s of blind spot
+
+**Patch the namespace that resolves the name, not the one that defines it.**
+`from x import f` copies `f` into the importer's module dict, so patching `x.f`
+afterwards changes nothing at the call site. `kernel_warmup` is defined in
+`vllm/model_executor/warmup/kernel_warmup.py` but called from `gpu_worker.py`,
+which imported it by name — so the target is
+`vllm.v1.worker.gpu_worker:kernel_warmup`. The same applies to the ~12
+sub-warmups: they are bound into `vllm.model_executor.warmup.kernel_warmup`,
+which is where they must be patched. A name imported *inside* the function body
+(`trigger_inductor_lazy_init`, `minimax_m3_msa_warmup`) is resolved at call time,
+so there the defining module is right. Listing both is harmless — only one can
+fire.
+
+**Check which of several coexisting implementations this build actually runs.**
+vLLM 0.28 ships two model runners side by side: the legacy
+`vllm/v1/worker/gpu_model_runner.py` and the v2 package
+`vllm/v1/worker/gpu/model_runner.py`, selected by `Worker.use_v2_model_runner`.
+Six patches aimed at the v1 module sat unresolved in `cs_patch._pending` for the
+life of every run, leaving 81.7% of the 13.3s warmup phase with no span under it.
+Nothing failed; the module was simply never imported. The same split is why
+`cudagraph_num_of_warmups` does nothing on this build — only the v1 runner reads
+it.
+
+### Verify coverage, then verify there is no dark time
+
+A patch that silently never applies is the failure mode to design against, so
+the report answers it two ways and you should read both:
+
+* `cs_patch` emits one `probe.patch_declared` meta at install and one
+  `probe.patch` instant per target as it resolves. The report reconstructs
+  coverage from those, unions across processes, and prints **two** lists: targets
+  whose module was imported but whose attribute was missing (a version
+  difference), and targets **whose module was never imported** (usually a probe
+  defect). These events do not depend on the process exiting in a way the probe
+  observes — which matters, because `EngineCore` does not, and its
+  `at_finish` summary never reaches the trace.
+* The `DARK SPAN` finding is the backstop that needs no foreknowledge: any span
+  over 1s and 2% of total whose interior is less than a quarter covered by
+  descendants gets named. That catches the next renamed module without anyone
+  having to notice the rename.
+
+For a new span inside the warmup phase, also check the `WARMUP / CUDA GRAPH
+CAPTURE` section: it rolls up every `warmup.*` and `cudagraph.*` span by name and
+splits capture by mode and by warmup-vs-captured forward, and its top line
+(`compile_or_warm_up_model: N total`) is what the children must add up to.
+
+### Then confirm the plumbing end to end
 
 ```bash
 make selftest
@@ -151,4 +199,5 @@ make selftest
 workers + resource tracker) and phase structure without a GPU, so the self-test
 exercises the tracer, the fork/spawn paths, the poller, all readiness edges and
 the full report. It will not tell you whether a *real* vLLM symbol still exists —
-for that, run against the image and read `probe.coverage`.
+for that, run against the image and read the two coverage lines at the foot of
+the report.

@@ -33,6 +33,9 @@ change moves a phase it should not, that is the interesting result.
 | **page cache** | fresh node vs repeat run on the same pod | `weight load` (the report flags when reads came from page cache) |
 | **hub offline** | `HF_HUB_OFFLINE=1` in the pod env | `network: hub metadata`, `config & tokenizer resolve` |
 | **eager vs compiled** | `--enforce-eager` | `torch.compile` and `cudagraph capture` should go to ~0; `first_token` may get worse |
+| **CUDA graph capture sizes** ⚠️ *diagnostic only* | `--compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,16,32,64,128,256,512]}'` | `cudagraph capture` — linear in list length (~124ms per PIECEWISE size at 32B, 11.4s → 2.5s cutting 51 sizes to 10). **Not a configuration to ship**: batches pad **up** to the next captured size, so this buys startup with steady-state throughput, and no edge this harness records can see the cost. Run it to size the phase, not to tune a deployment |
+| **CUDA graph mode** ⚠️ *diagnostic only* | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | `cudagraph capture` — drops the PIECEWISE pass outright, −7.5s at 32B. Same caveat: the cost lands on mixed prefill+decode batches under load, which this harness does not generate |
+| **kernel warmups** | `--kernel-config '{"enable_flashinfer_autotune":false,"enable_cutedsl_warmup":false,"enable_jit_warmup":false}'` | `warmup / profile run` — only −0.4s at 32B, at the edge of the noise floor. Also removes the 169-417ms `kimi_k3_triton` import on models that are not Kimi |
 | **tensor parallelism** | `--tensor-parallel-size 2,4,8` | `ipc handshake`, `device & collectives init`, `python imports` (once per worker) |
 | **CPU budget** | change the pod's cpu limit/request | `python imports`, `weight load`, `torch.compile`; watch the throttling finding |
 | **storage tier** | PVC `storageClassName` (NVMe / network / object-store cache) | `weight load` throughput |
@@ -758,7 +761,8 @@ Before quoting a number:
   no `--env` is *not* upstream-default — it inherits those. A baseline has to
   set the default back explicitly (`--env VLLM_WORKER_MULTIPROC_METHOD=spawn`),
   or the step you are trying to price reads as a no-op. Symptom: two arms whose
-  `python imports` phase is identical to 0.1s.
+  `python imports` phase is identical to 0.1s. The full list of pinned
+  variables is in [docs/kubernetes.md](kubernetes.md#constants-not-steps).
 * **Did the run-id collide with an earlier run?** `coldstart-run.sh` now refuses
   this, but a directory containing two runs' pid-keyed trace files renders as one
   enormous run without complaint. If a total looks impossible, count the

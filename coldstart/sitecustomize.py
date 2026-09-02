@@ -142,6 +142,11 @@ def _install():
             pass
     T.tracer.at_finish(_final)
 
+    # ...and once now, unconditionally. at_finish needs the process to die in a
+    # way the probe observes, which EngineCore does not do. See
+    # cs_patch.emit_declared().
+    cs_patch.emit_declared()
+
     overhead = time.monotonic() - t_start
     T.tracer.meta("probe.installed", probes=installed, failed=failed,
                   overhead_s=round(overhead, 4),

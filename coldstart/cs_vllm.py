@@ -139,6 +139,85 @@ PATCHES = [
     ("vllm.v1.worker.gpu_model_runner", "GPUModelRunner._dummy_sampler_run",
      "warmup.dummy_sampler_run", "warmup", None),
 
+    # The v2 model runner, selected by ``Worker.use_v2_model_runner``. It lives
+    # in a *package* (``vllm.v1.worker.gpu.model_runner``) while the legacy one
+    # is a module (``vllm.v1.worker.gpu_model_runner``), and both ship in the
+    # same release. Patching only the legacy name is how 10.9s of the warmup
+    # phase went dark: the v1 module is never imported on a v2 build, so its
+    # patches wait in ``_pending`` forever and the span has no children.
+    ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner.load_model",
+     "weights.runner_load_model", "weights", None),
+    ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner.profile_run",
+     "warmup.profile_run", "warmup", None),
+    ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner.capture_model",
+     "cudagraph.capture_model", "cudagraph", None),
+    ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner.initialize_kv_cache",
+     "kvcache.runner_initialize", "kvcache", None),
+    ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner._dummy_run",
+     "warmup.dummy_run", "warmup", None),
+    ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner._dummy_sampler_run",
+     "warmup.dummy_sampler_run", "warmup", None),
+    ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner._dummy_pooler_run",
+     "warmup.dummy_pooler_run", "warmup", None),
+
+    # ---- the steps inside compile_or_warm_up_model --------------------
+    # Patched at the *binding* site: gpu_worker.py does
+    # ``from vllm.model_executor.warmup.kernel_warmup import kernel_warmup``
+    # (and the same for warmup_kernels/freeze_gc_heap), so the name it calls
+    # lives in gpu_worker's module dict, not in the defining module.
+    ("vllm.v1.worker.gpu_worker", "kernel_warmup", "warmup.kernel_warmup",
+     "warmup", None),
+    ("vllm.v1.worker.gpu_worker", "warmup_kernels", "warmup.warmup_kernels",
+     "warmup", None),
+    ("vllm.v1.worker.gpu_worker", "freeze_gc_heap", "warmup.freeze_gc_heap",
+     "warmup", None),
+    # These two are imported *inside* compile_or_warm_up_model, so here the
+    # defining module is the right target.
+    ("vllm.compilation.compiler_interface", "trigger_inductor_lazy_init",
+     "warmup.inductor_lazy_init", "warmup", None),
+    ("vllm.utils.jit_monitor", "activate", "warmup.jit_monitor_activate",
+     "warmup", None),
+    # v2 runs scheduler-realistic prefill + decode steps through the worker's
+    # own entry points; without these the warmup_kernels span has no interior.
+    ("vllm.v1.worker.gpu.warmup", "run_mixed_prefill_decode_warmup",
+     "warmup.mixed_prefill_decode", "warmup", None),
+
+    # kernel_warmup's chain of gated sub-warmups. Every one of these is
+    # ``from ... import``-ed into kernel_warmup's namespace at module top, so
+    # the defining modules are the wrong target -- patch the namespace that
+    # actually resolves the name at call time.
+    ("vllm.model_executor.warmup.kernel_warmup", "qwen_triton_warmup",
+     "warmup.qwen_triton", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "deepseek_v4_mhc_warmup",
+     "warmup.deepseek_v4_mhc", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "kimi_k3_triton_warmup",
+     "warmup.kimi_k3_triton", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "fa4_cutedsl_warmup",
+     "warmup.fa4_cutedsl", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "sparse_mla_triton_warmup",
+     "warmup.sparse_mla_triton", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "_warmup_ll_bf16_router_gemm",
+     "warmup.ll_bf16_router_gemm", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "cutedsl_warmup",
+     "warmup.cutedsl", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup",
+     "flashinfer_sparse_mla_decode_autotune_warmup",
+     "warmup.flashinfer_sparse_mla_decode", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup",
+     "deepseek_v4_sparse_mla_attention_warmup",
+     "warmup.deepseek_v4_sparse_mla", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "deep_gemm_warmup",
+     "warmup.deep_gemm", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "b12x_warmup",
+     "warmup.b12x", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "flashinfer_autotune",
+     "warmup.flashinfer_autotune", "warmup", None),
+    ("vllm.model_executor.warmup.kernel_warmup", "warm_v1_block_table_kernels",
+     "warmup.v1_block_table", "warmup", None),
+    # imported lazily inside kernel_warmup(), so its own module is the target
+    ("vllm.model_executor.warmup.minimax_m3_msa_warmup", "minimax_m3_msa_warmup",
+     "warmup.minimax_m3_msa", "warmup", None),
+
     # ---- model construction + weight loading -------------------------
     ("vllm.model_executor.model_loader", "get_model", "weights.get_model",
      "weights", None),
@@ -253,6 +332,7 @@ def install():
     cs_patch.after_import("vllm.version", _on_vllm_version)
     _instrument_config_capture()
     _instrument_ready_marker()
+    _instrument_cudagraph_capture()
 
 
 def _on_vllm(vllm):
@@ -388,3 +468,120 @@ def _instrument_ready_marker():
         setattr(server, "startup", startup)
 
     cs_patch.after_import("uvicorn.server", _apply)
+
+
+def _instrument_cudagraph_capture():
+    """Split CUDA graph capture by mode, size, and warmup-vs-captured forward.
+
+    ``CudaGraphManager.capture`` (v1/worker/gpu/cudagraph_utils.py) loops
+    ``[PIECEWISE, FULL]`` and, per batch descriptor, calls
+    ``create_forward_fn(desc, warmup=True)`` then ``forward_fn(NONE)`` -- an
+    *eager* forward -- before capturing a second one. With 51 capture sizes and
+    two modes that is ~200 model forwards, and it is the single largest item in
+    the warmup phase. None of that structure is visible from outside the call:
+    one span around ``capture()`` gives a total, and the mode is a loop variable.
+
+    The seam is the ``create_forward_fn`` argument. Wrapping it -- and the
+    ``forward_fn`` it returns -- attributes every forward to a (mode, num_tokens)
+    pair without reimplementing any of the capture logic. Only the base class is
+    patched: ``ModelCudaGraphManager.capture`` builds its own closure and reaches
+    this one through ``super()``.
+
+    The warmup-vs-captured split cannot be read off the ``run_mode`` argument:
+    for FULL, and for breakable PIECEWISE, the capture pass also calls
+    ``forward_fn(CUDAGraphMode.NONE)`` -- inside ``torch.cuda.graph()`` -- so
+    both passes look identical from there. The authoritative signal is the
+    ``warmup=`` flag ``create_forward_fn`` was called with: a forward is a
+    capture if it came from a ``warmup=False`` factory call, or if it is run in
+    a real graph mode. Non-breakable PIECEWISE reuses the ``warmup=True``
+    factory for its capture and is caught by the second half of that rule.
+
+    ~300 spans is a rounding error against a 60s trace, so every forward and
+    every input prep is recorded exactly; ``CS_CUDAGRAPH_MIN_DUR`` can trim the
+    short ones if a much larger capture list ever makes that worthwhile.
+    """
+
+    def _apply(module):
+        cls = getattr(module, "CudaGraphManager", None)
+        if cls is None:
+            T.tracer.error("cudagraph.CudaGraphManager",
+                           AttributeError("vllm.v1.worker.gpu.cudagraph_utils"
+                                          ".CudaGraphManager"))
+            return
+        orig = getattr(cls, "capture", None)
+        if orig is None or getattr(orig, "_cs_cudagraph", False):
+            return
+        min_dur = T.env_float("CUDAGRAPH_MIN_DUR", 0.0)
+
+        def capture(self, create_forward_fn, *a, **kw):
+            counts = {}
+
+            def wrapped(desc, warmup=False, *da, **dkw):
+                mode = _desc_mode(desc)
+                tokens = getattr(desc, "num_tokens", None)
+                tok = T.tracer.begin("cudagraph.prepare_inputs", "cudagraph",
+                                     mode=mode, num_tokens=tokens,
+                                     warmup=bool(warmup))
+                try:
+                    fn = create_forward_fn(desc, warmup, *da, **dkw)
+                finally:
+                    T.tracer.end(tok, min_dur=min_dur)
+
+                # One factory call can serve both passes (non-breakable
+                # PIECEWISE), so the counter is per closure, not per descriptor.
+                seen = []
+
+                def forward(run_mode, *fa, **fkw):
+                    # A capture pass either runs in a real graph mode, or comes
+                    # from a warmup=False factory call. Everything else is the
+                    # eager warmup forward, which is unconditional on this path
+                    # -- see cudagraph_num_of_warmups, read only by v1.
+                    graphed = _mode_name(run_mode) != "NONE"
+                    eager = not graphed and warmup and not seen
+                    seen.append(1)
+                    key = (mode, "warmup" if eager else "capture")
+                    counts[key] = counts.get(key, 0) + 1
+                    name = ("cudagraph.warmup_forward" if eager
+                            else "cudagraph.capture_forward")
+                    tok = T.tracer.begin(name, "cudagraph", mode=mode,
+                                         num_tokens=tokens, graphed=graphed)
+                    try:
+                        return fn(run_mode, *fa, **fkw)
+                    finally:
+                        T.tracer.end(tok, min_dur=0.0)
+
+                return forward
+
+            tok = T.tracer.begin("cudagraph.manager_capture", "cudagraph")
+            try:
+                return orig(self, wrapped, *a, **kw)
+            finally:
+                T.tracer.end(tok, min_dur=0.0)
+                try:
+                    T.tracer.instant(
+                        "cudagraph.forward_counts", cat="cudagraph",
+                        counts={"%s/%s" % k: v for k, v in counts.items()},
+                        total=sum(counts.values()))
+                except Exception:
+                    pass
+
+        capture._cs_cudagraph = True
+        try:
+            capture.__name__ = getattr(orig, "__name__", "capture")
+        except Exception:
+            pass
+        setattr(cls, "capture", capture)
+
+    cs_patch.after_import("vllm.v1.worker.gpu.cudagraph_utils", _apply)
+
+
+def _mode_name(mode):
+    """CUDAGraphMode -> a short string, without importing vllm.config."""
+    name = getattr(mode, "name", None)
+    if isinstance(name, str):
+        return name
+    return str(mode)
+
+
+def _desc_mode(desc):
+    return _mode_name(getattr(desc, "cg_mode", None))

@@ -1,7 +1,7 @@
 ==============================================================================
 vLLM COLD START: process exec -> API server ready
 ==============================================================================
-run dir      : /Users/villardl/Projects/github.com/llm-d/llm-d-cold-start/runs/lad2-b-pyc-c2/trace
+run dir      : runs/lad2-b-pyc-c2/trace
 run id       : lad2-b-pyc-c2
 model        : Qwen/Qwen3-32B  (dtype=torch.bfloat16 tp=1 pp=1 eager=False)
 compilation  : level=None mode=3 cudagraph=FULL_AND_PIECEWISE sizes=51 cache_dir=
@@ -36,12 +36,12 @@ config & tokenizer resolve  117ms    0.2%  ............................
 network: hub metadata       863ms    1.3%  ............................
 network: weight download    31ms     0.0%  ............................
 ipc handshake               24ms     0.0%  ............................
-device & collectives init   2.02s    3.0%  #...........................
+device & collectives init   3ms      0.0%  ............................
 weight load                 32.4s   47.4%  #############...............
-kv cache alloc              1.88s    2.8%  #...........................
+kv cache alloc              1.99s    2.9%  #...........................
 torch.compile               55ms     0.1%  ............................
-cudagraph capture           144ms    0.2%  ............................
-warmup / profile run        10.0s   14.7%  ####........................
+cudagraph capture           2.04s    3.0%  #...........................
+warmup / profile run        10.1s   14.7%  ####........................
 api server startup          952ms    1.4%  ............................
 engine orchestration        3.09s    4.5%  #...........................
 unaccounted                 10ms     0.0%  ............................
@@ -49,10 +49,10 @@ TOTAL                       68.3s  100.0%
 
 top time sinks (span credited the most wall time in each phase):
   weight load                weights.load_weights                     31.0s
-  warmup / profile run       warmup.compile_or_warm_up                10.0s
+  warmup / profile run       warmup.compile_or_warm_up                10.1s
   engine orchestration       engine.async_llm_init                    2.57s
-  device & collectives init  cuda.synchronize                         2.00s
-  kv cache alloc             kvcache.determine_memory                 1.87s
+  kv cache alloc             kvcache.determine_memory                 1.98s
+  cudagraph capture          cudagraph.capture_begin                  1.96s
   weight load                weights.load_model                       975ms
   python imports             import torch                             926ms
   python imports             import transformers.utils.import_utils   912ms
@@ -118,6 +118,16 @@ python (pid 29513)            1.58s        1299     torch 1.06s, triton 146ms, c
 python (pid 29515)            1.61s        1299     torch 1.04s, triton 161ms, cuda 91ms, humming 52ms, numpy 39ms         
 
 ------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------
+WARMUP / CUDA GRAPH CAPTURE
+------------------------------------------------------------------------------
+compile_or_warm_up_model: 12.3s total
+
+step                     n    wall 
+-----------------------  ---  -----
+cudagraph.capture_begin  101  1.96s
+cudagraph.capture_end    13   82ms 
 SUBSYSTEMS
 ------------------------------------------------------------------------------
 network (dns/tcp/tls/http) n=65    sum=2.20s    wall=894ms    max=131ms
@@ -167,21 +177,39 @@ gpu memory used          : 479.9 MiB -> 479.9 MiB
 ------------------------------------------------------------------------------
 FINDINGS
 ------------------------------------------------------------------------------
- 1. PROCESS SERIALISATION: the last process (python (pid 29515)) only started
+ 1. DARK SPAN: 31.0s of weights.load_weights (pid 29469) has no probe
+    underneath it (1% of its interior is covered by child spans). The phase
+    table will show this as one opaque block. Add spans for what it calls --
+    and check cs_patch coverage for never_imported modules first, since a
+    renamed upstream module looks exactly like this.
+ 2. PROCESS SERIALISATION: the last process (python (pid 29515)) only started
     at t+18.4s, so everything it must do (imports, CUDA init, weight load)
     begins after that. Overlapping engine/worker bring-up with API server
     startup is pure win.
- 2. IMPORTS x4 PROCESSES: 10.5s of module execution summed across 4 Python
+ 3. IMPORTS x4 PROCESSES: 10.5s of module execution summed across 4 Python
     processes (worst single process 7.30s in api_server (pid 29423)). Only the
     wall-clock portion on the critical path counts, but this is the cost that
     a pre-warmed or forked engine process would avoid.
- 3. CPU THROTTLING: the container was throttled for 7.04s across 11 periods
+ 4. DARK SPAN: 9.67s of warmup.compile_or_warm_up (pid 29469) has no probe
+    underneath it (22% of its interior is covered by child spans). The phase
+    table will show this as one opaque block. Add spans for what it calls --
+    and check cs_patch coverage for never_imported modules first, since a
+    renamed upstream module looks exactly like this.
+ 5. CPU THROTTLING: the container was throttled for 7.04s across 11 periods
     during startup (cpu limit 16.0 cores). Raise the CPU limit/request:
     imports, safetensors conversion and Inductor compilation are all
     CPU-bound.
- 4. NETWORK ON CRITICAL PATH: 894ms attributed to HTTP (31ms of it weight
+ 6. DARK SPAN: 1.84s of kvcache.determine_memory (pid 29469) has no probe
+    underneath it (7% of its interior is covered by child spans). The phase
+    table will show this as one opaque block. Add spans for what it calls --
+    and check cs_patch coverage for never_imported modules first, since a
+    renamed upstream module looks exactly like this.
+ 7. NETWORK ON CRITICAL PATH: 894ms attributed to HTTP (31ms of it weight
     download). If the model is already local, set HF_HUB_OFFLINE=1 and
     TRANSFORMERS_OFFLINE=1 to remove the metadata round trips; also check
     VLLM_NO_USAGE_STATS=1 to drop the telemetry POST.
 
-probe targets not applied to this vLLM version (8): mmap:mmap.__init__, torch._inductor.output_code:FxGraphCache.load, torch._inductor.output_code:FxGraphCache.load_with_key, torch._inductor.codecache:FxGraphCache.load, torch._inductor.codecache:AsyncCompile.warm_pool, torch._inductor.codecache:AsyncCompile.wait, starlette.routing:Router.startup, huggingface_hub.file_download:_request_wrapper
+probe targets not applied to this vLLM version (8): huggingface_hub.file_download:_request_wrapper, mmap:mmap.__init__, starlette.routing:Router.startup, torch._inductor.codecache:AsyncCompile.wait, torch._inductor.codecache:AsyncCompile.warm_pool, torch._inductor.codecache:FxGraphCache.load, torch._inductor.output_code:FxGraphCache.load, torch._inductor.output_code:FxGraphCache.load_with_key
+
+probe targets whose module was never imported (24): nvidia_ml_py, setproctitle, vllm.compilation.backends, vllm.compilation.compiler_interface, vllm.compilation.decorators, vllm.compilation.wrapper, vllm.distributed.device_communicators.custom_all_reduce, vllm.engine.async_llm_engine ...
+    (trace predates per-target coverage events: list is from the 4 process(es) that reported, so a target may have applied in one that did not)

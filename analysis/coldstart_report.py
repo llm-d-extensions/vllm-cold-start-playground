@@ -188,10 +188,78 @@ class Run(object):
         self.config = self._meta("vllm.config")
         self.vllm_info = self._meta("vllm.info")
         self.torch_info = self._meta("torch.info")
-        self.coverage = self._meta("probe.coverage")
+        self.coverage = self._coverage()
         self.gpu_inventory = self._meta("gpu.inventory")
         self.ready_summary = self._meta("ready.summary")
         self.probe_installed = self._meta("probe.installed")
+
+    def _coverage(self):
+        """Probe coverage for the whole run, rebuilt from per-target events.
+
+        ``probe.coverage`` is written from ``Tracer.at_finish``, which needs the
+        process to die in a way the probe observes. EngineCore does not, so the
+        only ``probe.coverage`` in a run came from the API server -- and the API
+        server never imports the worker modules, so its ``never_imported`` list
+        says nothing about the process that does the work. That is how a renamed
+        model-runner module hid 10.9s of the warmup phase.
+
+        So prefer the incremental events (``probe.patch_declared`` at install,
+        one ``probe.patch`` per resolution), which survive any exit path, and
+        fall back to the ``probe.coverage`` meta for traces recorded before
+        those existed. A target counts as applied if it applied in *any*
+        process: several are legitimately unreachable in the API server.
+        """
+        declared = set()
+        for m in self.metas:
+            if m["name"] == "probe.patch_declared":
+                declared.update((m.get("args") or {}).get("targets") or [])
+        status = {}
+        for ev in self.instants:
+            if ev.get("name") != "probe.patch":
+                continue
+            args = ev.get("args") or {}
+            tgt = args.get("target")
+            if tgt is None:
+                continue
+            status.setdefault(tgt, set()).add(args.get("status"))
+        if not declared and not status:
+            return self._legacy_coverage()
+        applied = sorted(t for t, s in status.items() if "ok" in s)
+        not_applied = sorted(t for t, s in status.items() if "ok" not in s)
+        never = sorted(declared - set(status))
+        return {"applied": len(applied), "not_applied": not_applied,
+                "never_imported": never, "reported_by": None}
+
+    def _legacy_coverage(self):
+        """Coverage for traces recorded before the per-target events existed.
+
+        Only a process that died in a way the probe observed wrote a
+        ``probe.coverage`` summary, so these lists cover some subset of the
+        run's interpreters. The two operators differ: a patch that failed to
+        apply anywhere is a defect wherever it was seen, so ``not_applied`` is
+        a union; but "never imported" is only true of a target no process
+        imported, so that one is an *intersection* -- the helper subprocesses
+        import a few hundred modules and would otherwise drown the list.
+
+        Even the intersection overstates the blind spot, because the process
+        that does the work is usually the one that did not report: this run's
+        own ``fastsafetensors.parallel_loader`` patch demonstrably applied in
+        EngineCore and still shows up below. ``reported_by`` is what the
+        renderer uses to caveat that instead of presenting it as the truth.
+        """
+        legacy = [m for m in self.metas if m["name"] == "probe.coverage"]
+        if not legacy:
+            return None
+        not_applied, never, applied = set(), None, 0
+        for m in legacy:
+            a = m.get("args") or {}
+            not_applied.update(a.get("not_applied") or [])
+            n = set(a.get("never_imported") or [])
+            never = n if never is None else (never & n)
+            applied = max(applied, a.get("applied") or 0)
+        return {"applied": applied, "not_applied": sorted(not_applied),
+                "never_imported": sorted(never or ()),
+                "reported_by": len(legacy)}
 
     def _meta(self, name):
         for m in self.metas:
@@ -297,6 +365,32 @@ BLOCKING_SPANS = frozenset((
 ))
 
 
+# Spans that are real work but say nothing about *which* phase that work belongs
+# to. They nest inside whatever called them, they are deeper than their caller,
+# and the sweep picks the deepest span -- so left alone they steal the interval
+# and bill it to their own category. cuda.synchronize is the case that mattered:
+# it fires inside CUDA graph capture (once per captured graph) and carried ~1.6s
+# of capture cost into "device & collectives init", which is why that row's top
+# sink was cuda.synchronize in every report.
+#
+# Demoted, not dropped: they still win an interval where they are the only
+# active span (a bare synchronize between phases is device time and nothing
+# else's), and their totals are unchanged in the SUBSYSTEMS section.
+TRANSPARENT_SPANS = frozenset((
+    "cuda.synchronize",
+    "cuda.empty_cache",
+    "cuda.mem_get_info",
+    "cuda.reset_peak_memory_stats",
+    "cuda.memory_stats",
+    "gc.collect",
+    "gc.freeze",
+))
+
+
+def is_transparent(ev):
+    return ev.get("name", "") in TRANSPARENT_SPANS
+
+
 def is_blocking(ev):
     args = ev.get("args")
     if isinstance(args, dict) and "blocking" in args:
@@ -335,11 +429,11 @@ def sweep_phases(run, t0, t1):
             continue
         by_pid[s.get("pid")].append((
             max(ts, t0), min(end, t1), s.get("depth") or 0, classify(s),
-            s.get("name", ""), is_blocking(s)))
+            s.get("name", ""), is_blocking(s), is_transparent(s)))
 
     bounds = {t0, t1}
     for spans in by_pid.values():
-        for s, e, _, _, _, _ in spans:
+        for s, e, _, _, _, _, _ in spans:
             bounds.add(s)
             bounds.add(e)
     bounds = sorted(b for b in bounds if t0 <= b <= t1)
@@ -375,9 +469,11 @@ def sweep_phases(run, t0, t1):
             if not st["active"]:
                 continue
             # innermost active span: the best statement of what this process is
-            # doing right now.
-            cand = max(st["active"],
-                       key=lambda s: (s[2], PRIORITY.get(s[3], 0)))
+            # doing right now. Transparent spans (cuda.synchronize and friends)
+            # are considered only when nothing else is active -- see
+            # TRANSPARENT_SPANS.
+            pool = [s for s in st["active"] if not s[6]] or st["active"]
+            cand = max(pool, key=lambda s: (s[2], PRIORITY.get(s[3], 0)))
             # priority first, depth only to break ties -- see the docstring.
             key = (PRIORITY.get(cand[3], 0), cand[2], cand[3], cand[4], pid)
             if cand[5]:
@@ -549,6 +645,149 @@ def weight_window(run):
     return start, end
 
 
+def warmup_breakdown(run):
+    """The interior of ``compile_or_warm_up_model``, which is 26% of a tuned
+    startup and used to render as one opaque span.
+
+    Two things need to be readable without opening a trace. First, the steps:
+    kernel_warmup's chain of gated sub-warmups, graph capture, then
+    warmup_kernels and inductor's lazy init. Second, the shape of graph capture,
+    which is the bulk of it: one eager warmup forward plus one captured forward
+    per (mode, batch size), so the cost is a multiplier over
+    ``cudagraph_capture_sizes`` and it splits by mode.
+    """
+    L = []
+    top = [s for s in run.spans if s.get("name") == "warmup.compile_or_warm_up"]
+    steps = [s for s in run.spans
+             if s.get("cat") in ("warmup", "cudagraph")
+             and (s.get("dur") or 0) > 0
+             and s.get("name") not in ("warmup.compile_or_warm_up",)]
+    if not top and not steps:
+        return L
+
+    if top:
+        s = top[0]
+        L.append("compile_or_warm_up_model: %s total" % fmt_s(s.get("dur") or 0))
+
+    # steps directly under the top span, largest first
+    if top:
+        a = top[0]["ts"]
+        b = a + (top[0].get("dur") or 0)
+        pid = top[0].get("pid")
+        inner = [s for s in steps if s.get("pid") == pid
+                 and s["ts"] >= a and s["ts"] + (s.get("dur") or 0) <= b]
+    else:
+        inner = steps
+    # roll up by span name: the per-descriptor capture spans repeat ~200 times
+    roll = {}
+    for s in inner:
+        k = s.get("name")
+        e = roll.setdefault(k, {"n": 0, "sum": 0.0})
+        e["n"] += 1
+        e["sum"] += s.get("dur") or 0.0
+    rows = []
+    for name, e in sorted(roll.items(), key=lambda kv: -kv[1]["sum"]):
+        if e["sum"] < 0.001:
+            continue
+        rows.append([name, str(e["n"]), fmt_s(e["sum"])])
+    if rows:
+        L.append("")
+        table(rows, ["step", "n", "wall"], L)
+
+    # capture shape, by mode
+    fwd = defaultdict(lambda: {"n": 0, "sum": 0.0})
+    for s in run.spans:
+        n = s.get("name") or ""
+        if n not in ("cudagraph.warmup_forward", "cudagraph.capture_forward",
+                     "cudagraph.prepare_inputs"):
+            continue
+        mode = (s.get("args") or {}).get("mode") or "?"
+        key = (mode, n.split(".")[-1])
+        fwd[key]["n"] += 1
+        fwd[key]["sum"] += s.get("dur") or 0.0
+    if fwd:
+        modes = sorted({m for m, _ in fwd})
+        rows = []
+        for m in modes:
+            row = [m]
+            for kind in ("prepare_inputs", "warmup_forward", "capture_forward"):
+                e = fwd.get((m, kind))
+                row.append("%d / %s" % (e["n"], fmt_s(e["sum"])) if e else "-")
+            rows.append(row)
+        L.append("")
+        table(rows, ["capture mode", "prep n / wall", "eager warmup n / wall",
+                     "captured n / wall"], L)
+        L.append("    one eager warmup forward per captured graph is "
+                 "unconditional on the v2 model runner "
+                 "(gpu/cudagraph_utils.py) -- cudagraph_num_of_warmups is read "
+                 "only by the v1 runner, so it cannot turn this off.")
+    return L
+
+
+def dark_spans(run, total, min_dur=1.0, min_share=0.02, max_cov=0.5):
+    """Long spans whose interior is mostly not covered by child spans.
+
+    "Child" is by containment within the same process, not by parent id, so a
+    span instrumented at any depth below counts. Returns
+    ``(name, dur, covered_fraction, pid)`` for the worst offenders, largest dark
+    time first.
+    """
+    if total <= 0:
+        return []
+    by_pid = defaultdict(list)
+    for s in run.spans:
+        by_pid[s.get("pid")].append(s)
+    out = []
+    for pid, spans in by_pid.items():
+        spans.sort(key=lambda s: s["ts"])
+        for s in spans:
+            dur = s.get("dur") or 0.0
+            if dur < min_dur or dur < min_share * total:
+                continue
+            # A blocking span is empty by definition -- it is one process
+            # waiting on another. Reporting it as a blind spot would bury the
+            # spans that are empty because nobody instrumented them.
+            if is_blocking(s):
+                continue
+            a, b = s["ts"], s["ts"] + dur
+            kids = [(x["ts"], x["ts"] + (x.get("dur") or 0.0)) for x in spans
+                    if x is not s and (x.get("dur") or 0.0) > 0
+                    and x["ts"] >= a and x["ts"] + (x.get("dur") or 0.0) <= b]
+            covered, end = 0.0, a
+            for ks, ke in sorted(kids):
+                if ke <= end:
+                    continue
+                covered += ke - max(ks, end)
+                end = ke
+            frac = covered / dur if dur else 1.0
+            if frac < max_cov:
+                out.append((s.get("name", "?"), dur, frac, pid))
+    # A dark parent and its equally dark child are the same blind spot reported
+    # twice; keep the outermost by dropping any span contained in a reported one.
+    out.sort(key=lambda x: -x[1])
+    kept = []
+    for item in out:
+        if not any(item[1] <= k[1] and item[0] != k[0] and _contains(
+                run, k, item) for k in kept):
+            kept.append(item)
+    kept.sort(key=lambda x: -(x[1] * (1.0 - x[2])))
+    return kept[:3]
+
+
+def _contains(run, outer, inner):
+    """Is `inner`'s span nested inside `outer`'s, in the same process?"""
+    if outer[3] != inner[3]:
+        return False
+    o = next((s for s in run.spans if s.get("name") == outer[0]
+              and s.get("pid") == outer[3]), None)
+    i = next((s for s in run.spans if s.get("name") == inner[0]
+              and s.get("pid") == inner[3]), None)
+    if o is None or i is None:
+        return False
+    return (i["ts"] >= o["ts"]
+            and i["ts"] + (i.get("dur") or 0) <= o["ts"] + (o.get("dur") or 0))
+
+
 def findings(run, t0, t_ready, per_phase, unaccounted):
     """Actionable observations, ordered by how much time they explain."""
     out = []
@@ -687,6 +926,22 @@ def findings(run, t0, t_ready, per_phase, unaccounted):
                     "(imports, CUDA init, weight load) begins after that. "
                     "Overlapping engine/worker bring-up with API server "
                     "startup is pure win." % (last[1], fmt_s(last[0] - t0))))
+
+    # A span with nothing under it. `unaccounted` only catches wall clock that
+    # no span covers at all; it says nothing about a 13s span whose interior is
+    # empty, which reads in the phase table as a measured phase and is not one.
+    # This is the check that would have caught the renamed v2 model-runner
+    # module without anyone noticing the rename.
+    for name, dur, cov_frac, pid in dark_spans(run, total):
+        out.append((dur * (1.0 - cov_frac),
+                    "DARK SPAN: %s of %s (pid %s) has no probe underneath it "
+                    "(%.0f%% of its interior is covered by child spans). The "
+                    "phase table will show this as one opaque block. Add spans "
+                    "for what it calls -- and check cs_patch coverage for "
+                    "never_imported modules first, since a renamed upstream "
+                    "module looks exactly like this."
+                    % (fmt_s(dur * (1.0 - cov_frac)), name, pid,
+                       100.0 * cov_frac)))
 
     # instrumentation blind spot
     if unaccounted > 0.15 * total and total > 0:
@@ -900,6 +1155,14 @@ def render(run, min_ms=50.0, tree_depth=4):
     # ---- subsystem detail ----
     L.append("")
     L.append("-" * 78)
+    warm = warmup_breakdown(run)
+    if warm:
+        L.append("")
+        L.append("-" * 78)
+        L.append("WARMUP / CUDA GRAPH CAPTURE")
+        L.append("-" * 78)
+        L.extend(warm)
+
     L.append("SUBSYSTEMS")
     L.append("-" * 78)
     for cat, title in (("network", "network (dns/tcp/tls/http)"),
@@ -988,6 +1251,20 @@ def render(run, min_ms=50.0, tree_depth=4):
                  % (len(cov["not_applied"]),
                     ", ".join(cov["not_applied"][:8]) +
                     (" ..." if len(cov["not_applied"]) > 8 else "")))
+    if cov.get("never_imported"):
+        # Distinct from not_applied, and the more dangerous of the two: the
+        # module was never imported, so the patch never even got the chance to
+        # fail. A module that upstream renamed looks exactly like a module this
+        # build does not use.
+        L.append("")
+        L.append("probe targets whose module was never imported (%d): %s"
+                 % (len(cov["never_imported"]),
+                    ", ".join(cov["never_imported"][:8]) +
+                    (" ..." if len(cov["never_imported"]) > 8 else "")))
+        if cov.get("reported_by"):
+            L.append("    (trace predates per-target coverage events: list is "
+                     "from the %d process(es) that reported, so a target may "
+                     "have applied in one that did not)" % cov["reported_by"])
     if run.bad_lines:
         L.append("NOTE: %d unparseable trace lines (process killed mid-write?)"
                  % run.bad_lines)
