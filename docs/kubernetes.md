@@ -18,6 +18,17 @@ traffic the way a real deployment would. Use it for questions about the
 container's own lifecycle — "does our readiness probe let traffic in before vLLM
 can answer it?" — not for repeated measurement.
 
+**A two-GPU variant of Mode A — `manifests/pod-exec-2gpu.yaml`.** Byte-identical
+to `pod-exec.yaml` apart from `nvidia.com/gpu` in `limits` and `requests`, and it
+keeps the same pod name, so it is a drop-in replacement rather than a second pod:
+applying one replaces the other, and every script keeps working. It exists for one
+experiment — restoring a `cuda-checkpoint` snapshot onto a *different* GPU, which
+requires every candidate device to be visible to the same process
+([docs/sleep-mode.md](sleep-mode.md#restoring-onto-a-different-gpu)). That
+requirement is also its cost: requesting every GPU a workload might move between
+and doing your own assignment discards the device-plugin isolation model, so read
+it as an experiment shape, not a serving shape.
+
 `t0` is vLLM's own exec time in both modes, so their numbers are directly
 comparable. In Mode B the pod's own startup is visible only as the gap between
 the pod start time and `t0`, which the report does not count.

@@ -642,13 +642,21 @@ Scripts:
   — what state a checkpointed process is actually left in (fds, mappings, RSS),
   and whether this container could host a dumper at all.
 
-The two cross-GPU scripts need a pod that can **see** both cards.
-[`manifests/pod-exec.yaml`](../manifests/pod-exec.yaml) requests
-`nvidia.com/gpu: "1"` in two places (limits and requests); the runs above used a
-copy with both set to `"2"`, applied under the same pod name, with
-`CUDA_VISIBLE_DEVICES` left unset so torch sees both. Note that a one-GPU pod
-cannot substitute — rule 3 above rejects a remap to a device the process cannot
-see, and that is not a workaround-able limitation.
+The two cross-GPU scripts need a pod that can **see** both cards, which is
+[`manifests/pod-exec-2gpu.yaml`](../manifests/pod-exec-2gpu.yaml):
+
+```
+kubectl -n <ns> apply -f manifests/pod-exec-2gpu.yaml
+```
+
+It is byte-identical to [`manifests/pod-exec.yaml`](../manifests/pod-exec.yaml)
+apart from `nvidia.com/gpu` in `limits` and `requests`, and keeps the same pod
+name, so `scripts/run-experiment.sh`, `make exec` and every probe script work
+against it unchanged — applying one replaces the other. `CUDA_VISIBLE_DEVICES` is
+left unset in both, so torch sees whatever the device plugin assigned.
+
+A one-GPU pod cannot substitute: rule 3 above rejects a remap to a device the
+process cannot see, and that is not a workaround-able limitation.
 
 `cuda-checkpoint` is **not** in the vLLM image. The binary is a 5976-byte ELF at
 `bin/x86_64_Linux/cuda-checkpoint` in
