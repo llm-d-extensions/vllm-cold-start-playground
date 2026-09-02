@@ -97,6 +97,67 @@ CPU requests equal CPU limits so the measurement is not at the mercy of
 neighbours. Pin an image digest for anything you intend to compare across days;
 the vLLM version is one of the strongest determinants of start time.
 
+## Constants, not steps
+
+The step table in the [README](../README.md#results-so-far-qwen3-32b-on-one-h100)
+prices one change per row. The variables below are pinned identically in
+`manifests/pod-exec.yaml` and `manifests/pod-serve.yaml` for *every* arm, so none
+of them is ever a row — but each one moves the absolute numbers, so a total
+measured here is not a total measured on a stock pod.
+
+| variable | value | why it is on |
+|---|---|---|
+| `VLLM_ENABLE_STARTUP_PLAN` | `1` | skips memory profiling on a repeat boot; ~0.6s |
+| `OMP_NUM_THREADS` | `16` | stops torch/OpenMP sizing thread pools from the node's core count instead of the cgroup quota |
+| `HOME`, `HF_HOME`, `HF_HUB_CACHE`, `XDG_CACHE_HOME`, `VLLM_CACHE_ROOT`, `TORCHINDUCTOR_CACHE_DIR`, `TRITON_CACHE_DIR`, `FLASHINFER_CACHE_DIR`, `FLASHINFER_WORKSPACE_BASE` | `/cache/*` on the PVC | see [Cache directories must all be explicit](#cache-directories-must-all-be-explicit) |
+| `VLLM_NO_USAGE_STATS`, `DO_NOT_TRACK` | `1` | see [Keeping the baseline honest](#keeping-the-baseline-honest) |
+
+**`VLLM_ENABLE_STARTUP_PLAN=1`.** vLLM writes the result of its memory-profiling
+pass — the suggested `--kv-cache-memory` value and the free-memory baseline it was
+measured against — to `$VLLM_CACHE_ROOT/startup_plan/`, keyed by a
+hardware-plus-config fingerprint. A later boot that matches the fingerprint, and
+finds at least as much free GPU memory as the recorded baseline, skips profiling
+entirely.
+
+It is worth about 0.6s, not the ~1.9s a naive cold-versus-warm reading suggests.
+One pair on `Qwen/Qwen2.5-1.5B-Instruct`, vLLM 0.28.0
+(`runs/20260901-191644-r1` and `-r2`): r1 logged `Saved startup plan to
+/cache/vllm/startup_plan/startup_plan_faaa0e6a718763db.json` and spent 2.01s in
+`kvcache.determine_memory`; r2 logged `Applying persisted startup plan
+(fingerprint faaa0e6a718763db) ... Memory profiling will be skipped` and spent
+1.37s. Note that 1.37s is not overhead the plan failed to remove: even when it
+logs `Memory profiling will be skipped`, `determine_available_memory` still calls
+`profile_run()` — the skip covers the `memory_profiling` context and
+`profile_cudagraph_memory()`, not the forward (finding 4 in
+[what should be upstreamed](../README.md#warmup-and-cuda-graph-capture-five-findings-with-no-lever)).
+The rest of the cold-versus-warm gap was that forward pass *compiling*, which the
+torch.compile cache already covers — so counting the whole gap here double-counts
+a win that belongs to the compile cache. That is one pair,
+not a median of three; treat 0.6s as an order of magnitude.
+
+Two conditions on it. It never pays on the first boot of a given fingerprint,
+because that boot is the one writing the plan — and the fingerprint covers
+hardware and config, so a GPU change, a TP change or most engine-arg changes
+start over. And it only crosses pods because `VLLM_CACHE_ROOT` points at the PVC;
+with the cache root left at its default, the plan dies with the container and the
+flag buys nothing in a deployment that starts one pod per request.
+
+**`OMP_NUM_THREADS=16`.** torch and OpenMP size their pools from the *node's*
+core count, not the cgroup quota, so an unset value on a large node oversubscribes
+a small container: a traced run reached 193 threads under a 16-core limit, which
+is why CPU/wall during imports was 1.42 rather than ~1.0, and it produced cgroup
+throttling at only 1.4 cores of real use
+(`manifests/pod-exec.yaml:85-92`). Keep it in step with `resources.limits.cpu` —
+they are one setting in two places.
+
+One variable in the manifests is pinned but *is* a step:
+`VLLM_WORKER_MULTIPROC_METHOD=fork` (README step 3), pinned at the non-default
+because most arms want it. An arm that passes no `--env` therefore inherits
+`fork` and is **not** upstream-default; a baseline has to set it back explicitly
+with `--env VLLM_WORKER_MULTIPROC_METHOD=spawn`. The symptom of forgetting is two
+arms whose `python imports` phase agrees to 0.1s — see
+[the honesty checklist](experiments.md#honesty-checklist).
+
 ## Credentials
 
 ```bash

@@ -33,9 +33,12 @@ differ by seconds and because which one you pick changes what "ready" means.
 
 `Qwen/Qwen3-32B` (61.02 GiB, 17 shards), TP=1 on one H100 80GB, weights on GPFS,
 `--max-model-len 8192`. Each step adds one change to the row above it. Median of 3,
-with the five arms interleaved within each cycle and a warm-up cycle discarded, so
-torch.compile misses and cold bytecode land on every arm equally instead of on
-whichever one happened to run first.
+with the arms of a matrix interleaved within each cycle and a warm-up cycle
+discarded, so torch.compile misses and cold bytecode land on every arm equally
+instead of on whichever one happened to run first. The steps come from one
+five-arm matrix (`runs/lad2-*`); a second five-arm matrix (`runs/w6-*`) priced the
+CUDA graph capture levers discussed below, and its baseline arm re-measured the
+step-5 config and reproduced it to within 0.16s.
 
 | # | change added | median ready | the 3 runs | Δ | phase that moved |
 |---|---|---|---|---|---|
@@ -46,8 +49,12 @@ whichever one happened to run first.
 | 5 | `cs_fst` patch: `nogds=True`, `max_threads=8`, `bbuf_size_kb=32768` | [**43.30s**](reports/32b-step5-cs-fst-patch.txt) | 42.85 / 43.30 / 44.38 | −4.34s | weight load 17.6 → 13.7s |
 
 **90.65s → 43.30s, −47.35s (−52%).** Only step 5 needs patched code; steps 2-4 are
-configuration. Compile time is 0.21-0.23s in every arm, so nothing here is a
+configuration. Compile time is 0.21-0.25s in every arm, so nothing here is a
 recompile artifact.
+
+The next phase down, `cudagraph capture` at 11.4s, is deliberately **not** a step:
+every configuration lever that shrinks it degrades steady-state inference. See
+[CUDA graph capture](#cuda-graph-capture-114s-that-configuration-cannot-honestly-remove).
 
 Each median links to that run's full report in [`reports/`](reports/) — phase
 breakdown, per-process span tree and subsystem detail. The report also shows the
@@ -80,6 +87,12 @@ What the phase breakdown says about each step:
   that most deployments never set it.
 * **Then fastsafetensors asks for hardware that is not installed** — the `nogds`
   row below.
+* **What is left is CUDA graph capture — 11.4s that this harness can measure and
+  should not "fix".** vLLM captures one graph per batch size per mode: 51 sizes ×
+  2 modes = 102 graphs, **11.4s**, 26% of the step-5 total, in a phase this
+  harness used to report as a single opaque `warmup` span. Every knob that
+  shrinks it takes the time back out of steady-state inference, so it stays out
+  of the table; the measurements are [below](#cuda-graph-capture-114s-that-configuration-cannot-honestly-remove).
 
 Caveats, so the table is read for what it is:
 
@@ -89,10 +102,79 @@ Caveats, so the table is read for what it is:
   optimistic for a first-ever pull on a node.
 * Constants across all arms, set by `manifests/pod-exec.yaml` and not part of any
   step: caches on a PVC, `OMP_NUM_THREADS=16` against a 16-core cgroup limit, and
-  `VLLM_ENABLE_STARTUP_PLAN=1`. The last one helps the baseline, so the
-  reductions above are if anything understated.
-* One node, one GPU, TP=1, and readiness is `/health` 200. Reproduce with
-  `runs/lad2-*`.
+  `VLLM_ENABLE_STARTUP_PLAN=1` — which persists the memory-profiling result under
+  `$VLLM_CACHE_ROOT` so a repeat boot with the same fingerprint skips profiling,
+  worth ~0.6s. It helps the baseline, so the reductions above are if anything
+  understated. All three are documented in
+  [docs/kubernetes.md](docs/kubernetes.md#constants-not-steps).
+* **These five reports were re-rendered after a phase-attribution fix**, so their
+  per-phase numbers differ from earlier copies while `TOTAL` and `unaccounted`
+  are byte-identical. `cuda.synchronize` nests *inside* CUDA graph capture and
+  used to win the attribution sweep on depth, billing ~1.7-2.0s of capture cost
+  to `device & collectives init`; syncs are now transparent to the sweep and that
+  time sits in `cudagraph capture`. Consequence: `device & collectives init`
+  reads ~2ms in these runs, not 1.7s. The residual real cost of
+  `worker.init_device` (727ms) is fully overlapped by two helper subprocesses
+  importing torch, which outrank it cross-process.
+  These traces also predate the v2-runner probes, so their `warmup / profile run`
+  vs `cudagraph capture` split is not comparable to `runs/w6-*` — the ladder's
+  `TOTAL` column is.
+* **The capture matrix independently reproduced step 5.** Its `base` arm *is* the
+  step-5 config, and landed at 43.46s median against the 43.30s measured in the
+  earlier matrix on a different day — 0.16s apart, which is the best evidence
+  here that the ladder's absolute numbers are reproducible across days.
+* One node, one GPU, TP=1, and readiness is `/health` 200. Reproduce the steps
+  with `runs/lad2-*` and the capture measurements with `runs/w6-*`.
+
+### CUDA graph capture: 11.4s that configuration cannot honestly remove
+
+After step 5, `cudagraph capture` is the second-largest phase — **11.4s of 43.4s,
+26%** — and three stock CLI levers shrink it. All three were measured in a full
+interleaved median-of-3 matrix. **None is adopted, and none should be**: each one
+buys startup time by making steady-state inference worse, and the amount worse is
+something this harness cannot measure at all.
+
+| arm | median ready | the 3 runs | Δ vs `base` | why it is not a step |
+|---|---|---|---|---|
+| `base` — step-5 config, 51 sizes, `FULL_AND_PIECEWISE` | 43.46s | 43.42 / 43.46 / 44.07 | — | — |
+| 10 capture sizes ([report](reports/32b-cudagraph-sizes-experiment.txt)) | 34.32s | 34.01 / 34.32 / 34.90 | −9.14s | fewer graphs means batches pad up to the next captured size — see below |
+| `cudagraph_mode=FULL_DECODE_ONLY`, 51 sizes | 35.95s | 35.46 / 35.95 / 36.46 | −7.52s | drops the PIECEWISE pass outright, so the cost lands on mixed prefill+decode batches under load |
+| `--kernel-config` with flashinfer autotune, cutedsl and JIT warmups off | 43.09s | 42.27 / 43.09 / 43.35 | −0.37s | the only one with no steady-state cost, but 0.37s against a ~0.9s spread does not earn a row |
+| 10 sizes **and** the kernel warmups off | 34.14s | 33.86 / 34.14 / 35.31 | −9.32s | 0.18s better than the size list alone, well inside both arms' spread |
+
+**Why the size list is not a free lever.**
+`_compute_bs_to_padded_graph_size` (`v1/cudagraph_dispatcher.py:72`) pads a batch
+**up** to the next captured size. With the default 51-size ladder the padding is
+at most ~8 tokens. With 10 sizes, a batch of 129 runs as a batch of 256 — roughly
+twice the decode work for the same output, on every batch that lands in a gap, for
+the entire life of the server. Trading a one-time 9s against that is a bad trade
+for any deployment that serves more than a few minutes of traffic.
+
+**And this harness is structurally blind to it.** `first_token − health_200` is
+43ms in all five arms, because batch size 1 is captured in every one of them. A
+single batch-1 request cannot observe padding waste. So the `first_token` parity
+across these arms is *not* evidence that the cost is small — it is evidence that
+we did not measure it. Pricing it needs a throughput benchmark under a realistic
+batch-size distribution, which is out of scope here.
+
+**What the measurement is good for** is sizing the prize and locating it
+precisely, which is what makes it an upstream argument rather than an operator
+workaround:
+
+* capture cost is **linear in the number of sizes** (~124ms per PIECEWISE size),
+  so the 51-size default is a deliberate 11.4s and nobody is told;
+* it is **not** `torch.compile` — that is 0.24s on an AOT cache hit;
+* it is **not** graph capture itself — torch-level `capture_begin` is 1.66s of the
+  11.4s, and per mode is identical to within 1% (0.832s FULL, 0.828s PIECEWISE);
+* it **is** the PIECEWISE forward: 124ms per size against 16ms for FULL, a 7.7x
+  gap at identical graph counts.
+
+So the 11.4s should be attacked by making capture cheaper or reusable — a faster
+piecewise path, capture parallelism, capturing **on demand** so only the shapes a
+workload actually reaches are ever built
+([docs/on-demand-cudagraph.md](docs/on-demand-cudagraph.md)), or persisting graphs
+across boots ([Foundry](docs/foundry.md)) — not by asking operators to shorten the
+list.
 
 ## What is patched, and what should be upstreamed
 
@@ -104,6 +186,7 @@ One is a monkey-patch, and it is the one with a real upstream fix behind it.
 | `PYTHONPYCACHEPREFIX` | env var, stock CPython | Nothing in vLLM. The image should ship its own `.pyc`: `python -m compileall` at build time puts them in a read-only layer and no operator has to know this knob exists. |
 | `VLLM_WORKER_MULTIPROC_METHOD=fork` | env var, already a supported value | `fork` works but is on borrowed time — it forks a multi-threaded, torch-loaded parent, vLLM silently reverts to `spawn` if CUDA is already initialised, and Python 3.14 moves the Linux default to `forkserver`. vLLM already contains forkserver support (`api_server.py:111-117`) but **rejects the value**: `envs.py:930` declares the choices as `["spawn", "fork"]` (and the annotation at `envs.py:67` agrees), so `get_mp_context()` (`utils/system_utils.py:168`) raises `ValueError`. Making it reachable is those two lines; making it *pay* also needs `forkserver.ensure_running()` moved to the top of `cli/main.py:main()`, because where it sits now only ~1.7s of its ~15s preload overlaps anything. |
 | `--load-format fastsafetensors` | stock CLI flag | Nothing to patch. Worth documenting that the win is this large, since the flag is easy to miss. |
+| **nothing** — CUDA graph capture is *not* configured away here | measured only, see [above](#cuda-graph-capture-114s-that-configuration-cannot-honestly-remove) | Capturing 51 sizes × 2 modes costs **11.4s** at TP=1 on a 32B model, 26% of time-to-ready, and it is unavoidable without degrading inference. The cost is concentrated in the PIECEWISE forward — 124ms per size against 16ms for FULL at identical graph counts, while torch-level capture is 1.66s of the 11.4s. Four things would move it without an operator trade-off: make the piecewise capture forward cheaper (it is 7.7x FULL for no obvious reason), overlap capture across sizes instead of running 102 forwards serially, capture on demand so only the shapes a workload reaches are built ([docs/on-demand-cudagraph.md](docs/on-demand-cudagraph.md) — 11.4s off readiness, 3.3s of it deleted outright, but it needs a vLLM change and fixes a latent silent-corruption bug first), or persist graphs across boots so a warm node captures nothing at all. The last is what [Foundry](docs/foundry.md) does — and note that snapshotting the graph pool with `cuda-checkpoint` is *not* a shortcut to it: CUDA exposes no graph serialization API at all, and captured kernels embed device addresses reaching into the weights and KV cache, so nothing smaller than the full 68.8 GiB address space is restorable ([why](docs/foundry.md#why-cuda-checkpoint-is-not-a-next-boot-shortcut)). Within a *live* process it is a different story: vLLM's VMM-based sleep mode frees 69.70 GiB and `cuda-checkpoint` then takes the residual to **0 MiB**, all the way back in **5.09s** with the graphs intact ([docs/sleep-mode.md](docs/sleep-mode.md)) — but that keeps the process and ~64 GiB of host RAM, so it is warm standby, not cold start. Serializing that snapshot for the *next* boot is not a `cuda-checkpoint` capability and cannot be made into one: its whole interface is pid-keyed with no output path, and what `--action checkpoint` produces is a GPU-free process (0 `/dev/nvidia*` fds, 0 MiB held) for a dumper to write out, never a file ([priced](docs/sleep-mode.md#can-the-snapshot-be-serialized-and-reused-by-a-fresh-vllm)). What the live snapshot *can* do is move: `--action restore --device-map` brings a parked engine back on a **different GPU** of the same node in **2.67s**, and the 61.68 GiB of new allocations at `/wake_up` follow the remap onto the new card ([measured](docs/sleep-mode.md#restoring-onto-a-different-gpu)) — so a pod can defragment its own devices without re-reading weights or re-capturing graphs, at the cost of having to see all of them. Shortening `cudagraph_capture_sizes` is *not* the fix — it moves the cost to steady state. |
 | `nogds=True`, `max_threads=8`, `bbuf_size_kb=32768` | **monkey-patch** — [`coldstart/cs_fst.py`](coldstart/cs_fst.py) wraps `fastsafetensors.parallel_loader.ParallelLoader.__init__`; opt-in via `CS_FST=1` | `weight_utils.py:1057` computes `nogds = pg.size() > 1`, and the comment above it shows why: at TP>1 `cuFileDriverOpen()` would create CUDA contexts on every visible GPU. Availability of GDS is never checked, so at TP=1 vLLM *always* asks for it. There *is* a fallback (`weight_utils.py:1083`), but it needs a `RuntimeError` with `"gds"` in the message — and fastsafetensors degrades internally rather than raising, so the fallback never fires: the `"GDS not enabled"` warning appears in none of our runs. The failed probe is then billed silently to every fresh `EngineCore` — 1.69s of one-time setup plus 0.91s of steady-state throughput. It should key on whether `libcufile` and `nvidia_fs` exist, not on world size. `max_threads` and `bbuf_size_kb` are not reachable from vLLM at all: not plumbed through, and absent from fastsafetensors' own `LoaderConfig`. |
 
 Two hazards deliberately *not* fixed here, both prerequisites for the forkserver
@@ -118,6 +201,56 @@ The other opt-in probe, [`coldstart/cs_forkserver.py`](coldstart/cs_forkserver.p
 (`CS_FORKSERVER=1`), measures the forkserver ceiling without patching vLLM by
 starting the preload at t≈0 and swapping `get_mp_context()`. It is not in the table
 above: at TP=1 it lands at parity with `fork`, which is the expected result.
+
+### Warmup and CUDA graph capture: five findings with no lever
+
+`warmup / profile run` was the #2 phase and a single opaque span. Instrumented
+(`runs/w6-*`, and see [docs/instrumentation.md](docs/instrumentation.md)),
+`compile_or_warm_up_model` is **14.0s**, 80% of it CUDA graph capture — which is
+[not configurable away](#cuda-graph-capture-114s-that-configuration-cannot-honestly-remove).
+The five findings below are the rest: each is an upstream bug or a missing knob,
+and together they are the 3.6-3.9s of `warmup / profile run` that survives every
+arm of that matrix.
+
+1. **The eager warmup forward before every capture is unconditional on the v2
+   runner.** `cudagraph_num_of_warmups` (default 0 at
+   `config/compilation.py:643`, forced to 1 at `config/vllm.py:1539`) is read
+   only at `v1/worker/gpu_model_runner.py:7067` — the **v1** runner. This build
+   selects v2 (`Worker.use_v2_model_runner`), and `gpu/cudagraph_utils.py` runs
+   one eager forward per (mode, size) with no test against the knob: 102 forwards,
+   **2.19s** of the 11.2s capture phase, unreachable. Either honour the knob on
+   v2 or delete it.
+2. **Activating the JIT monitor imports tilelang and TVM — 1.00s to install an
+   observability hook.** `activate_jit_monitor` → `_setup_tilelang_jit_hook` →
+   `import tilelang` → `tvm`, including `tvm.relax.backend.adreno`, a mobile-GPU
+   backend. `jit_monitor_mode` is `Literal["warn", "error"]`, so there is no off
+   switch; it costs 1.00s cold and still 436ms with warm bytecode. If tilelang is
+   not already in `sys.modules`, no tilelang kernel can JIT during inference and
+   the hook has nothing to watch — gating `_setup_tilelang_jit_hook` on
+   `sys.modules.get("tilelang")` makes it free on every model that does not use
+   tilelang, which is most of them.
+3. **`kimi_k3_triton_warmup`'s architecture check sits behind its own 417ms
+   import.** `_get_kda_layer` runs
+   `from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention` — pulling in
+   `vllm.models.deepseek_v4` and `compressed_tensors` — purely to reach an
+   `isinstance` check that returns `None` for Qwen3. The gate is
+   `enable_jit_warmup`, not the model architecture. Testing the config's
+   architecture string before importing costs nothing.
+4. **The startup plan does not skip the profile run it says it skips.**
+   `determine_available_memory` logs `Memory profiling will be skipped` and then
+   calls `self.model_runner.profile_run()` anyway — **2.31s** here — because it
+   "still need[s] a profile run which compiles the model for
+   max_num_batched_tokens". What `VLLM_ENABLE_STARTUP_PLAN=1` actually skips is
+   the `memory_profiling` context and `profile_cudagraph_memory()`, not the
+   forward. The log line should say which.
+5. **PIECEWISE capture costs 7.7x FULL for the same number of graphs, and the
+   cost is not in the capture.** Exactly one torch `CUDAGraph` per (mode, size):
+   51 PIECEWISE, 51 FULL. Torch-level capture time is
+   identical to within 1% (0.832s FULL vs 0.828s PIECEWISE) — but the *captured
+   forward* is 124ms per size for PIECEWISE
+   against 16ms for FULL. So the penalty is the piecewise dispatch path, not
+   graph capture, and it is nearly flat in batch size (98ms at 1 token, 174ms at
+   512), which is why trimming the size list pays close to linearly.
 
 ## Quickstart
 
@@ -172,9 +305,36 @@ instrumentation, not a rounding artifact.
   injected, what each module measures, every `CS_*` knob, and how to instrument
   a new vLLM symbol.
 * **[docs/kubernetes.md](docs/kubernetes.md)** — the manifests, Mode A vs
-  Mode B, cache volumes, OpenShift/SCC notes, troubleshooting.
+  Mode B, cache volumes, the env vars pinned across every arm, OpenShift/SCC
+  notes, troubleshooting.
 * **[docs/experiments.md](docs/experiments.md)** — the experiment matrix and how
   to run a defensible comparison.
+* **[docs/on-demand-cudagraph.md](docs/on-demand-cudagraph.md)** — the design
+  exploration for taking the 11.4s `cudagraph capture` phase off the readiness
+  path by capturing lazily on first use instead of eagerly at startup: what vLLM
+  already supports, the silent-corruption bug that blocks it, and what it is worth.
+* **[docs/sleep-mode.md](docs/sleep-mode.md)** — the one lever that already
+  works today: `--enable-sleep-mode` frees 69.70 GiB and wakes in **1.45s** with
+  the captured CUDA graphs still replayable (verified byte-identical output), and
+  layering `cuda-checkpoint` on the ~3-4 GiB residual takes the card to **0 MiB**
+  and back in **5.09s**. Not a cold-start fix — hibernation for a warm replica —
+  plus what it costs, why the remaining blocker is Kubernetes rather than CUDA,
+  and a silent level-2 footgun. Also: the snapshot can be restored onto a
+  **different GPU** on the same node — a warmed Qwen3-32B engine migrated between
+  two H100s in **4.13s** while another tenant held 76 GiB of the original card,
+  with the 61.68 GiB of *new* allocations at wake following the remap and output
+  byte-identical — subject to three measured `--device-map` rules, one of which
+  (the target must be visible to the process) forces the pod to see every GPU it
+  might move between. And it prices the follow-on question of whether the
+  snapshot can be *serialized* and reused by a fresh vLLM: it cannot with
+  `cuda-checkpoint`, which has no on-disk format at all, and the CRIU route is
+  only arithmetically interesting in its thin level-2 form (**6.61 GiB** image,
+  ~25s vs 43.3s) against a level-1 image of **75.67 GiB** that takes longer to
+  read than a cold boot takes to run. That same thin shape is the more useful
+  variant of the *live* composition too: parking at level 2 and refilling weights
+  on wake would cost ~16s instead of 4.13s but hold 6.61 GiB of host RAM instead
+  of 75.67 GiB — the difference between one parked replica and a dozen on a
+  128 GiB container. It needs one path vLLM does not have yet.
 * **[docs/foundry.md](docs/foundry.md)** — ingested notes on
   [Foundry](https://github.com/foundry-org/foundry), which persists CUDA graphs to
   disk: what it eliminates in our phase model, its operating constraints, and how

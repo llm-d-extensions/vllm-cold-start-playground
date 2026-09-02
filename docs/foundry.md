@@ -24,6 +24,41 @@ of inference-engine compilation artifacts, keyed by
 It is *not* a weight-distribution system. `weight load` and
 `network: weight download` are untouched.
 
+**The prize is now measured, not assumed.** At Qwen3-32B / TP=1 with the
+[step-5 config](../README.md#results-so-far-qwen3-32b-on-one-h100),
+`cudagraph capture` is **11.4s** and `warmup / profile run` a further **3.9s** —
+together **15.3s of a 43.4s** time-to-ready, 35%. `torch.compile` is *not* part
+of the prize here: it is 0.24s on an AOT cache hit.
+
+That 15.3s has **no configuration alternative**. The CLI levers that shrink
+capture all pay for it in steady-state inference — a shorter
+`cudagraph_capture_sizes` list makes batches pad up to the next captured size, and
+`FULL_DECODE_ONLY` moves the cost onto mixed prefill+decode batches
+([why they are rejected](../README.md#cuda-graph-capture-114s-that-configuration-cannot-honestly-remove)).
+Persisting the graphs is the only approach measured here that takes the 15.3s
+*without* giving anything back at runtime, which is precisely what makes Foundry
+worth evaluating rather than a curiosity.
+
+The one other approach with that property is **capturing on demand** instead of at
+startup — same graph set, same padding, built lazily on first use
+([docs/on-demand-cudagraph.md](on-demand-cudagraph.md)). The two are complements,
+not alternatives: Foundry wins the *repeat* boot of a known configuration and
+recovers the whole phase, while on-demand capture wins the *first* boot, an unknown
+shape mix, or a node with no snapshot. Notably, Foundry's own pins (below) are
+exactly the constraints on-demand capture does not impose. The ideal boot would do
+both: load the snapshot, and lazily build only the shapes it missed.
+
+Two of Foundry's config pins corroborate our own findings, which is worth noting
+because they were reached independently:
+
+* It pins `cudagraph_mode FULL_DECODE_ONLY` — we measure that at −7.5s on its
+  own.
+* It force-stomps `cudagraph_num_of_warmups` to 0 *and* pins
+  `VLLM_USE_V2_MODEL_RUNNER=0`. Those two are the same workaround: the knob is
+  read only by the v1 runner, so on v2 the pre-capture eager warmup forward
+  (2.19s here) cannot be turned off at all. See finding 1 in
+  [what should be upstreamed](../README.md#warmup-and-cuda-graph-capture-five-findings-with-no-lever).
+
 ## What it does
 
 A serving engine's CUDA graphs cannot simply be serialized: a captured graph
@@ -53,6 +88,146 @@ topology group, and applies node-param updates on demand at replay
 trajectory*. If a LOAD-side allocation lands at a different offset, captured
 kernels read unmapped or stale memory — and the failure is silent. Every
 integration quirk below exists to enforce that.
+
+## Why cuda-checkpoint is not a next-boot shortcut
+
+Scope, because `cuda-checkpoint` turns out to be genuinely useful for a
+*different* job. For the **live-process** case — free the GPU, keep the process,
+take the GPU back — it works, measured: vLLM sleep mode frees 69.70 GiB via the
+CUDA VMM API, `cuda-checkpoint` then takes the residual to **0 MiB**, and the
+whole thing comes back in **5.09s** with byte-identical output and the captured
+graphs intact. That is [docs/sleep-mode.md](sleep-mode.md).
+
+What follows is about the harder goal Foundry actually addresses: reloading graphs
+into a **fresh process** on a cold node. There, `cuda-checkpoint` does not help,
+for the reasons below.
+
+The obvious shortcut is to snapshot the graph pool with NVIDIA's
+[`cuda-checkpoint`](https://github.com/NVIDIA/cuda-checkpoint) and reload it on the
+next boot — 1.84 GiB on disk instead of 11.4s of capture. It does not work, and the
+reasons are worth recording because they are also *why Foundry is shaped the way it
+is*. Foundry's own framing above rejects exactly this: "checkpoint/restore the whole
+process (inflexible across parallelism changes)".
+
+Four independent blockers, in increasing order of how fatal they are:
+
+1. **`cuda-checkpoint` has no partial mode and no on-disk format.** Its interface is
+   whole-process and all-or-nothing (`--action lock|checkpoint|restore|unlock --pid`),
+   with no output path and no format — `strings` on the binary finds exactly one
+   file-related symbol, `fwrite`, for its own stdout. Checkpointing copies the
+   process's CUDA state into *that process's own host address space* and releases the
+   GPU; it never writes a file. Measured: after `--action checkpoint` the process
+   holds **0** `/dev/nvidia*` fds and 0 MiB of device memory, its RSS having grown by
+   exactly the device footprint. So it does not snapshot a process — it converts a
+   GPU-holding process into an ordinary one, and leaves serializing to a dumper.
+   `--get-restore-tid` exists solely so that dumper knows which thread to resume CUDA
+   on. Getting bytes onto disk requires CRIU — still whole-process. Priced out in
+   [sleep-mode.md](sleep-mode.md#can-the-snapshot-be-serialized-and-reused-by-a-fresh-vllm):
+   a level-1 image weighs 75.67 GiB (~90s to read at this filesystem's 859 MB/s,
+   worse than booting), a level-2 image 6.61 GiB.
+
+2. **CUDA cannot serialize a graph at all.** On this driver, `cuda.h` and
+   `cuda_runtime_api.h` expose **216** `cuGraph*`/`cudaGraph*` entry points and
+   **none** of them export, import, or serialize; confirmed against the driver's own
+   symbol table, which exports **95** `cuGraph*` symbols with the same result
+   (`cuGraphUpload` uploads an instantiated `CUgraphExec` to a stream — not
+   serialization). The only ways out of a graph are `cudaGraphDebugDotPrint` (a DOT
+   diagram, not executable) and `cudaGraphClone` (in-process). The contrast is the
+   point: `cuModuleLoadData` / `cuLibraryLoadData` *do* ingest a binary blob, so CUDA
+   has a serialized format for **kernels** (cubin, PTX) and deliberately none for
+   **graphs**. So "load the graph from a snapshot" has no supported API to call,
+   independent of any checkpointing tool.
+
+3. **The graph pool is not the graphs.** The 1.84 GiB is the allocator arena the
+   captured kernels read and write. The executable object is driver-side: a DAG of
+   kernel nodes, each holding a `CUfunction` handle into a loaded module plus a
+   packed argument buffer. Restoring the arena gives you data, not an executor.
+
+4. **Captured pointers reach outside the pool, so a slice is meaningless.** Kernel
+   arguments embed absolute device addresses into the **weights (61.03 GiB)**, the
+   **KV cache (5.93 GiB)** and the persistent input/output buffers — not just the
+   pool. Making them valid means restoring the whole device address space at
+   identical addresses: **68.8 GiB**, i.e. the whole-process checkpoint again. And a
+   fresh vLLM process will not reproduce that layout; `cuda-checkpoint` guarantees VA
+   stability only *within one process's own* checkpoint→restore cycle, because it
+   re-reserves the ranges it released. Forcing determinism across *separate* boots is
+   precisely what Foundry's `libcuda_hook.so` VMM cursor exists to do — and the
+   invariant above notes that violating it fails *silently*. Worth noting the one
+   case where this blocker evaporates: a CRIU restore does not *start* a process, it
+   resurrects the identical address space, so every baked pointer is valid for free.
+   That is the sole reason the level-2 image sketch is arithmetically interesting at
+   all — but it also means the artefact is welded to one driver version, one GPU
+   model and one set of flags, where Foundry's archive is not.
+
+The VMM primitives Foundry needs are all present on this driver
+(`cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`, `cuMemSetAccess`,
+`cuMemUnmap`, `cuMemRelease`), so its approach is buildable here.
+
+### What cuda-checkpoint *can* do here, measured
+
+It is a **warm-standby / GPU-multiplexing** tool, not a boot accelerator: park a
+fully initialised process's CUDA state in host RAM, release the GPU, and later
+restore it. The graphs survive because the entire address space returns to the same
+addresses — which is exactly the property a partial restore cannot have. A genuinely
+cold node gains nothing.
+
+Measured on our node (2026-09-02); the tool itself is **not installed**, so these
+size the ceiling rather than reproduce it:
+
+| | |
+|---|---|
+| driver | 580.105.08 — past the r550 floor `cuda-checkpoint` requires |
+| device bytes to park | weights 61.03 + KV 5.93 + graph pool 1.84 = **68.8 GiB** |
+| H2D pinned (restore) | **54.5 GB/s → 1.36s** |
+| H2D pageable | 18.5 GB/s → 3.99s |
+| D2H pinned (checkpoint) | 53.5 GB/s → 1.38s |
+| host RAM | ~2.0 TiB node, but the container cgroup caps at **128 GiB** |
+| `ptrace_scope` / caps | 0 / `drop: ["ALL"]` — same-uid ptrace needs no `CAP_SYS_PTRACE` |
+
+So a park/unpark cycle is bandwidth-bound at **~1.4s** against a 43.3s cold boot —
+a 30x gap — but it costs a resident process holding 68.8 GiB of host RAM, and the
+128 GiB cgroup limit means one parked replica per container, not several.
+
+**vLLM sleep mode reaches that same ~1.4s without the tool**, measured rather than
+estimated: 1.45s to wake, 69.70 GiB freed, 61.68 GiB of pinned host backup, graphs
+verified replayable ([docs/sleep-mode.md](sleep-mode.md)). It works because it frees
+only the *pool-tagged* allocations and keeps the VMM address reservations, so the
+graphs' baked pointers stay valid — a partial restore that is possible precisely
+because it never leaves the process. That leaves `cuda-checkpoint` a much narrower
+job than "warm standby": the residual **4.17 GiB** of CUDA context, loaded modules
+and graph pool that sleep mode cannot release.
+
+Two items previously flagged unverified here, now resolved:
+
+* **NCCL at TP>1 does not survive implicitly, and vLLM already knows.** A
+  sleep-mode backend must declare `preserves_communicators()`
+  (`device_allocator/sleep_mode_backend.py:84`), and `Worker.checkpoint_prepare` /
+  `checkpoint_restore` (`v1/worker/gpu_worker.py:261`) fan out to every device
+  communicator (`distributed/parallel_state.py:2049`) for exactly this. `CuMemBackend`
+  can answer `True` only because communicator buffers live outside its pool; a
+  process-level checkpoint cannot, and must use those hooks.
+* **Pinned vs pageable staging is worth 2.5s and vLLM chooses pinned.**
+  `PIN_MEMORY` is `True` here (`utils/torch_utils.py:74`), and the measured level-1
+  transfers land at 52.6 GB/s D2H / 45.7 GB/s H2D — pinned rates. Note the *first*
+  park costs **26.03s**, not 1.3s, because the 61.68 GiB pinned host buffer has to be
+  allocated once; any tool staging through pinned memory pays that same one-off.
+
+And one capability it has that Foundry does not: **the restored state can land on
+a different GPU.** `--action restore --device-map old=new,...` remaps devices during
+restore, and a warmed Qwen3-32B engine parked off one H100 came back on the other in
+**2.67s** while a second tenant held 76 GiB of the original card — with `/wake_up`'s
+61.68 GiB of *new* allocations following the remap and output byte-identical
+([measured](sleep-mode.md#restoring-onto-a-different-gpu)). Three rules bind it: the
+map must cover every device *visible to the process* (not just those holding
+contexts — which is why every single-entry map, identity included, is rejected), it
+must be a bijection, and the target must be visible, so the default one-GPU-per-pod
+Kubernetes shape cannot use it. This is a within-pod defragmentation primitive, not
+a scheduler-level one; the device still never returns to the device plugin.
+
+`SleepModeBackendFactory` is a plugin registry whose own registration comment names
+the candidates — *"Third-party backends (CUDA checkpoint, CRIU, durable snapshot)
+register the same way through a `vllm.general_plugins` entry point, without changes
+to vLLM core"* — so a `cuda-checkpoint` backend is an out-of-tree plugin, not a fork.
 
 ## Reported numbers (upstream, unverified)
 
