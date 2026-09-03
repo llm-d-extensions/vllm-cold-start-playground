@@ -137,7 +137,11 @@ echo "[$(ts)] /sleep?level=1 in $(elapsed "$S")   mem: $(mem)"
 if [[ "$TP" == "2" ]]; then
   S=$(date +%s.%N)
   curl -s -X POST "localhost:$PORT_A/checkpoint_prepare" -o /dev/null
-  echo "[$(ts)] /checkpoint_prepare (tear down NCCL) in $(elapsed "$S")"
+  # Not "tear down NCCL": on vLLM 0.28.0 this releases only the FlashInfer
+  # all-reduce workspace and FlashInfer all2all (cuda_communicator.py:588), so
+  # with stock backends it frees nothing and the checkpoint below then wedges
+  # the driver. See docs/sleep-mode.md.
+  echo "[$(ts)] /checkpoint_prepare (FlashInfer workspaces only) in $(elapsed "$S")"
 fi
 S=$(date +%s.%N)
 for p in $PIDS_A; do "$CC" --action lock --pid "$p" --timeout 120000; done
@@ -221,7 +225,7 @@ else
   echo "[$(ts)] restored: $(mem)"; apps
   S=$(date +%s.%N)
   curl -s -X POST "localhost:$PORT_A/checkpoint_restore" -o /dev/null
-  echo "[$(ts)] /checkpoint_restore (rebuild NCCL) in $(elapsed "$S")"
+  echo "[$(ts)] /checkpoint_restore (re-attach FlashInfer workspaces) in $(elapsed "$S")"
   S=$(date +%s.%N)
   curl -s -X POST "localhost:$PORT_A/wake_up" -o /dev/null
   echo "[$(ts)] /wake_up in $(elapsed "$S")   mem: $(mem)"; apps

@@ -5,11 +5,23 @@ Three pieces already exist inside vLLM and are reachable via
 never grew a route for them:
 
   * ``Worker.checkpoint_prepare`` / ``checkpoint_restore``
-    (``v1/worker/gpu_worker.py``) -- tear down / rebuild the NCCL device
-    communicators around a ``cuda-checkpoint`` checkpoint/restore of a TP>1
-    engine's ``WorkerProc``s. Without this, checkpointing a TP>1 engine
-    checkpoints live NCCL state that ``cuda-checkpoint`` was never designed to
-    freeze.
+    (``v1/worker/gpu_worker.py``) -- detach / re-attach device-communicator
+    state around a ``cuda-checkpoint`` checkpoint/restore of a TP>1 engine's
+    ``WorkerProc``s. Checkpointing a TP>1 engine without this freezes live
+    cross-rank state that ``cuda-checkpoint`` was never designed to freeze.
+
+    Do not read the name as "tears down NCCL": it does not, and measuring that
+    is what `scripts/tp2-park-probe.sh` is for. On vLLM 0.28.0
+    ``CudaCommunicator.checkpoint_prepare`` (``cuda_communicator.py:588``)
+    releases only the FlashInfer all-reduce workspace and the FlashInfer
+    all2all manager -- its own comment says "Only FlashInfer all-reduce and
+    FlashInfer all2all are supported for now". ``pynccl_comm`` is built
+    unconditionally whenever ``world_size > 1`` and is never touched, and the
+    stock TP dispatch chain on an NVLink H100 pair is
+    ``['CUSTOM', 'SYMM_MEM', 'PYNCCL']`` -- none of which this method releases.
+    So with default backends the call returns in ~0.06s having freed nothing
+    that matters, and the checkpoint that follows hangs. See
+    ``docs/sleep-mode.md`` for the isolating matrix.
   * ``Worker.reload_weights`` -> ``GPUModelRunner.reload_weights``
     (``v1/worker/gpu_model_runner.py``) -- reload the original checkpoint from
     disk straight into the existing, already-mapped parameter tensors, in

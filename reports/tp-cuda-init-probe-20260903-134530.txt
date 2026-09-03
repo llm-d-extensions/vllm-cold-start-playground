@@ -1,0 +1,96 @@
+=== scripts/tp-cuda-init-probe.py  2026-09-03T13:45:30Z ===
+pod=vllm-coldstart ns=lionel-cold-start  driver=580.105.08  vllm 0.28.0 / torch 2.13.0+cu130
+
+##################### --tp 2
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+torch 2.13.0+cu130  cuda_initialized_at_import=False
+vllm 0.28.0  after_vllm_import=False  hits=0
+tp=2  after_create_engine_config=True  hits=1
+  (config built ok: tp=2 fusions=?)
+
+=== stack 1: what called torch.cuda._lazy_init ===
+  /tmp/tp-cuda-init-probe.py:94 in <module>
+      sys.exit(main())
+  /tmp/tp-cuda-init-probe.py:66 in main
+      cfg = args.create_engine_config()
+  /usr/local/lib/python3.12/dist-packages/vllm/engine/arg_utils.py:2501 in create_engine_config  <-- vllm
+      config = VllmConfig(
+  /usr/local/lib/python3.12/dist-packages/pydantic/_internal/_dataclasses.py:121 in __init__
+      s.__pydantic_validator__.validate_python(ArgsKwargs(args, kwargs), self_instance=s)
+  /usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:1611 in __post_init__  <-- vllm
+      self._set_compile_ranges()
+  /usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:2078 in _set_compile_ranges  <-- vllm
+      max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
+  /usr/local/lib/python3.12/dist-packages/vllm/config/compilation.py:200 in flashinfer_max_size  <-- vllm
+      max_size_mb = self.default_fi_allreduce_fusion_max_size_mb().get(world_size)
+  /usr/local/lib/python3.12/dist-packages/vllm/config/compilation.py:206 in default_fi_allreduce_fusion_max_size_mb  <-- vllm
+      from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+  <frozen importlib._bootstrap>:1360 in _find_and_load
+  <frozen importlib._bootstrap>:1331 in _find_and_load_unlocked
+  <frozen importlib._bootstrap>:935 in _load_unlocked
+  <frozen importlib._bootstrap_external>:995 in exec_module
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  /usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:90 in <module>  <-- vllm
+      import flashinfer.comm as _flashinfer_comm
+  <frozen importlib._bootstrap>:1360 in _find_and_load
+  <frozen importlib._bootstrap>:1310 in _find_and_load_unlocked
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  <frozen importlib._bootstrap>:1360 in _find_and_load
+  <frozen importlib._bootstrap>:1331 in _find_and_load_unlocked
+  <frozen importlib._bootstrap>:935 in _load_unlocked
+  <frozen importlib._bootstrap_external>:995 in exec_module
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  /usr/local/lib/python3.12/dist-packages/flashinfer/__init__.py:24 in <module>  <-- third party
+      from . import jit as jit
+  <frozen importlib._bootstrap>:1415 in _handle_fromlist
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  <frozen importlib._bootstrap>:1360 in _find_and_load
+  <frozen importlib._bootstrap>:1331 in _find_and_load_unlocked
+  <frozen importlib._bootstrap>:935 in _load_unlocked
+  <frozen importlib._bootstrap_external>:995 in exec_module
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  /usr/local/lib/python3.12/dist-packages/flashinfer/jit/__init__.py:22 in <module>  <-- third party
+      from . import cubin_loader
+  <frozen importlib._bootstrap>:1415 in _handle_fromlist
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  <frozen importlib._bootstrap>:1360 in _find_and_load
+  <frozen importlib._bootstrap>:1331 in _find_and_load_unlocked
+  <frozen importlib._bootstrap>:935 in _load_unlocked
+  <frozen importlib._bootstrap_external>:995 in exec_module
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  /usr/local/lib/python3.12/dist-packages/flashinfer/jit/cubin_loader.py:30 in <module>  <-- third party
+      from .core import logger
+  <frozen importlib._bootstrap>:1360 in _find_and_load
+  <frozen importlib._bootstrap>:1331 in _find_and_load_unlocked
+  <frozen importlib._bootstrap>:935 in _load_unlocked
+  <frozen importlib._bootstrap_external>:995 in exec_module
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  /usr/local/lib/python3.12/dist-packages/flashinfer/jit/core.py:15 in <module>  <-- third party
+      from . import env as jit_env
+  <frozen importlib._bootstrap>:1415 in _handle_fromlist
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  <frozen importlib._bootstrap>:1360 in _find_and_load
+  <frozen importlib._bootstrap>:1331 in _find_and_load_unlocked
+  <frozen importlib._bootstrap>:935 in _load_unlocked
+  <frozen importlib._bootstrap_external>:995 in exec_module
+  <frozen importlib._bootstrap>:488 in _call_with_frames_removed
+  /usr/local/lib/python3.12/dist-packages/flashinfer/jit/env.py:161 in <module>  <-- third party
+      FLASHINFER_WORKSPACE_DIR: pathlib.Path = _get_workspace_dir_name()
+  /usr/local/lib/python3.12/dist-packages/flashinfer/jit/env.py:149 in _get_workspace_dir_name  <-- third party
+      compilation_context = CompilationContext()
+  /usr/local/lib/python3.12/dist-packages/flashinfer/compilation_context.py:105 in __init__  <-- third party
+      major, minor = torch.cuda.get_device_capability(device)
+  /usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:720 in get_device_capability
+      prop = get_device_properties(device)
+  /usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:737 in get_device_properties
+      _lazy_init()  # will define _get_device_properties
+
+##################### --tp 1
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+torch 2.13.0+cu130  cuda_initialized_at_import=False
+vllm 0.28.0  after_vllm_import=False  hits=0
+tp=1  after_create_engine_config=False  hits=0
+  (config built ok: tp=1 fusions=?)
+
+No _lazy_init during config creation at this TP. If this is the --tp 1 arm, that is the expected contrast.
+

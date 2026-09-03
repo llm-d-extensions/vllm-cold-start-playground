@@ -27,6 +27,14 @@ Knobs (all optional):
                             cs_forkserver.py for CS_FORKSERVER_MODE/_PRELOAD)
     CS_FST=1                override fastsafetensors ParallelLoader kwargs
                             (off by default; see cs_fst.py)
+    CS_CGPOOLS=n            spread CUDA graph capture over n mempools instead of
+                            vLLM's one shared pool (off by default)
+    CS_CGSYNC=stream|none   weaken the device sync torch does inside every
+                            capture (default device = upstream; cs_cgcapture.py)
+    CS_CGEMPTY=once|0       once: hoist the capture prologue's empty_cache() to
+                            a single call after the loop (the -4.0s arm);
+                            0: skip it outright, which keeps the memory
+    CS_CGDETAIL=1           span all 3366 captures, not just those over 5ms
     CS_DEV_ROUTES=1         add /checkpoint_prepare, /checkpoint_restore and
                             /reload_weights HTTP routes (off by default; see
                             cs_dev_routes.py)
@@ -131,6 +139,14 @@ def _install():
     # parameters for an upstream change. See coldstart/cs_fst.py.
     import cs_fst
     step("fst", cs_fst.install)
+
+    # Opt-in twice over (CS_CGPOOLS / CS_CGSYNC / CS_CGEMPTY); prices the two
+    # preconditions of concurrent CUDA graph capture -- one mempool per capturing
+    # thread, and no device sync inside the capture window. See
+    # coldstart/cs_cgcapture.py. Installed after cs_torch so its graph.__enter__
+    # patch wraps the cudagraph.capture_begin span rather than replacing it.
+    import cs_cgcapture
+    step("cgcapture", cs_cgcapture.install)
 
     # Opt-in twice over (CS_DEV_ROUTES=1); adds /checkpoint_prepare,
     # /checkpoint_restore and /reload_weights HTTP routes. See

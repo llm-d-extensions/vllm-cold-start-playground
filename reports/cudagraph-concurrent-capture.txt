@@ -1,0 +1,79 @@
+# Concurrent CUDA graph capture: raw probe output
+# 2026-09-03T13:58:33Z  ns=lionel-cold-start-cc  pod=vllm-coldstart  node=pokprod-b93r44s2
+# image: vllm/vllm-openai@sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635
+# scripts/cudagraph-concurrent-capture.py and scripts/cudagraph-capture-legality.py,
+# copied into the pod and run there. See docs/concurrent-cudagraph-capture.md.
+
+=== python3 ccc.py --threads 2 4 8 --reps 5 ===
+torch 2.13.0+cu130  cuda 13.0  NVIDIA H100 80GB HBM3
+workload: 32 graphs x 200 layers x (512,1024) bf16, ~400 nodes/graph
+
+serial                         94.1 ms  [93-129]  cpu/wall=1.00  per-graph= 2.94 ms  maxdiff=0  {'graphmem_MiB': 4.0}
+serial-globalmode              97.0 ms  [94-125]  cpu/wall=1.00  per-graph= 3.03 ms  maxdiff=0  {'graphmem_MiB': 4.0}
+threads-2-ownpool              85.7 ms  [82-91]  cpu/wall=1.78  per-graph= 2.68 ms  maxdiff=0  {'concurrency': 2.0, 'graphmem_MiB': 8.0}
+threads-4-ownpool              94.3 ms  [90-98]  cpu/wall=2.75  per-graph= 2.95 ms  maxdiff=0  {'concurrency': 3.91, 'graphmem_MiB': 16.0}
+threads-8-ownpool             155.7 ms  [151-159]  cpu/wall=2.89  per-graph= 4.87 ms  maxdiff=0  {'concurrency': 7.57, 'graphmem_MiB': 32.0}
+threads-2-sharedpool       FAILED: RuntimeError: beginAllocateToPool: already recording to mempool_id
+threads-4-sharedpool       FAILED: RuntimeError: beginAllocateToPool: already recording to mempool_id
+threads-8-sharedpool       FAILED: RuntimeError: beginAllocateToPool: already recording to mempool_id
+
+serial-noalloc                 84.7 ms  [78-107]  cpu/wall=1.00  per-graph= 2.65 ms  maxdiff=0  {'graphmem_MiB': 2.0}
+threads-2-noalloc              72.0 ms  [64-80]  cpu/wall=1.77  per-graph= 2.25 ms  maxdiff=0  {'concurrency': 2.01, 'graphmem_MiB': 0.0}
+threads-4-noalloc              86.5 ms  [75-136]  cpu/wall=2.36  per-graph= 2.70 ms  maxdiff=0  {'concurrency': 3.99, 'graphmem_MiB': 0.0}
+threads-8-noalloc              86.5 ms  [84-91]  cpu/wall=3.47  per-graph= 2.70 ms  maxdiff=0  {'concurrency': 7.84, 'graphmem_MiB': 0.0}
+
+threads-2-globalmode       FAILED: AcceleratorError: CUDA error: operation not permitted when stream is capturing
+Search for `cudaErrorStreamCaptureUnsupported' in https://docs.nvidia.c
+
+wrote /tmp/ccc5.json
+
+=== python3 ccc.py --pool-probe ===
+torch 2.13.0+cu130  cuda 13.0  NVIDIA H100 80GB HBM3
+workload: 32 graphs x 200 layers x (512,1024) bf16, ~400 nodes/graph
+
+graph-pool cost of N mempools (serial capture, memory only):
+  1 pool(s) for 32 graphs:      4.0 MiB reserved for graph memory   maxdiff=0
+  2 pool(s) for 32 graphs:      8.0 MiB reserved for graph memory   maxdiff=0
+  4 pool(s) for 32 graphs:     16.0 MiB reserved for graph memory   maxdiff=0
+  8 pool(s) for 32 graphs:     32.0 MiB reserved for graph memory   maxdiff=0
+
+=== python3 legal.py ===
+# Re-run 2026-09-03T14:27:51Z after a correctness fix to the probe: it used to run all eight
+# checks against ONE capture, and check #1 (a device sync) invalidates that
+# capture -- so checks 2-8 were being measured against a capture that was
+# already dead. Each check now gets its own fresh capture, and the third column
+# reports whether the capture survived the check. Every verdict below matches
+# the earlier shared-capture run, so the conclusions in the doc are unchanged;
+# what is new is that they are now sound, and that the survival column
+# separates "refused" from "fatal".
+torch 2.13.0+cu130  cuda 13.0  NVIDIA H100 80GB HBM3
+
+--- another thread capturing with capture_error_mode='thread_local', one fresh capture per probe ---
+  operation, from a non-capturing thread               probe    capture survived
+  torch.cuda.synchronize()                             RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
+        AcceleratorError: CUDA error: operation not permitted when stream is capturing
+  torch.cuda.empty_cache()                             ok       yes
+  torch.cuda.current_stream().synchronize()            ok       yes
+  torch.zeros(1<<22, device=cuda)  # fresh cudaMalloc  ok       yes
+  eager matmul on default stream                       ok       yes
+  torch.cuda.mem_get_info()                            ok       yes
+  second capture, own pool                             ok       yes
+  second capture, same pool                            RAISES   yes
+        RuntimeError: beginAllocateToPool: already recording to mempool_id
+
+--- another thread capturing with capture_error_mode='global', one fresh capture per probe ---
+  operation, from a non-capturing thread               probe    capture survived
+  torch.cuda.synchronize()                             RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
+        AcceleratorError: CUDA error: operation not permitted when stream is capturing
+  torch.cuda.empty_cache()                             RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
+        AcceleratorError: CUDA error: operation not permitted when stream is capturing
+  torch.cuda.current_stream().synchronize()            RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
+        AcceleratorError: CUDA error: operation not permitted when stream is capturing
+  torch.zeros(1<<22, device=cuda)  # fresh cudaMalloc  ok       yes
+  eager matmul on default stream                       RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
+        AcceleratorError: CUDA error: operation not permitted when stream is capturing
+  torch.cuda.mem_get_info()                            ok       yes
+  second capture, own pool                             RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
+        AcceleratorError: CUDA error: operation not permitted when stream is capturing
+  second capture, same pool                            RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
+        AcceleratorError: CUDA error: operation not permitted when stream is capturing

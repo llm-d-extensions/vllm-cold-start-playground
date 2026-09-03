@@ -1,0 +1,523 @@
+WARNING 09-03 10:57:56 [argparse_utils.py:257] With `vllm serve`, you should provide the model as a positional argument or in a config file instead of via the `--model` option. The `--model` option will be removed in a future version.
+(APIServer pid=440) INFO 09-03 10:57:56 [api_utils.py:333] 
+(APIServer pid=440) INFO 09-03 10:57:56 [api_utils.py:333]        █     █     █▄   ▄█
+(APIServer pid=440) INFO 09-03 10:57:56 [api_utils.py:333]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.28.0
+(APIServer pid=440) INFO 09-03 10:57:56 [api_utils.py:333]   █▄█▀ █     █     █     █  model   Qwen/Qwen3-32B
+(APIServer pid=440) INFO 09-03 10:57:56 [api_utils.py:333]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=440) INFO 09-03 10:57:56 [api_utils.py:333] 
+(APIServer pid=440) INFO 09-03 10:57:56 [api_utils.py:272] non-default args: {'model_tag': 'Qwen/Qwen3-32B', 'port': 8010, 'model': 'Qwen/Qwen3-32B', 'max_model_len': 8192, 'enable_sleep_mode': True, 'load_format': 'fastsafetensors'}
+(APIServer pid=440) Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(APIServer pid=440) INFO 09-03 10:57:56 [model.py:598] Enabling cumem allocator because sleep mode requires it.
+(APIServer pid=440) INFO 09-03 10:57:56 [model.py:672] Resolved architecture: Qwen3ForCausalLM
+(APIServer pid=440) INFO 09-03 10:57:56 [model.py:1965] Using max model len 8192
+(APIServer pid=440) INFO 09-03 10:57:56 [scheduler.py:242] Chunked prefill is enabled with max_num_batched_tokens=8192.
+(APIServer pid=440) INFO 09-03 10:57:56 [kernel.py:308] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(EngineCore pid=559) INFO 09-03 10:57:59 [core.py:122] Initializing a V1 LLM engine (v0.28.0) with config: model='Qwen/Qwen3-32B', speculative_config=None, tokenizer='Qwen/Qwen3-32B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=main, tokenizer_revision=main, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=8192, download_dir=None, load_format=fastsafetensors, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=Qwen/Qwen3-32B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'ir_enable_torch_wrap': True, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::qwen_gdn_attention_core', 'vllm::qwen_gdn_attention_core_fused_norm_packed', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 512, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, enable_jit_warmup=True, enable_bf16x3_router_gemm=False, moe_backend='auto', linear_backend='auto')
+(EngineCore pid=559) INFO 09-03 10:58:03 [parallel_state.py:1638] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/vllm_dist_a2883931d4504cc3868046a79f3bf5ab backend=nccl
+(EngineCore pid=559) INFO 09-03 10:58:03 [parallel_state.py:1982] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=559) INFO 09-03 10:58:03 [gpu_worker.py:396] Using V2 Model Runner
+(EngineCore pid=559) INFO 09-03 10:58:04 [model_runner.py:358] Loading model from scratch...
+(EngineCore pid=559) INFO 09-03 10:58:04 [cuda.py:486] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=559) INFO 09-03 10:58:04 [flash_attn.py:866] Using FlashAttention version 3
+(EngineCore pid=559) [cs_fst] ParallelLoader override: {'nogds': True, 'max_threads': 8, 'bbuf_size_kb': 32768} (was {'nogds': False, 'max_threads': None, 'bbuf_size_kb': None}, gds=False)
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:   0% Completed | 0/17 [00:00<?, ?it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:   6% Completed | 1/17 [00:00<00:12,  1.31it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  12% Completed | 2/17 [00:01<00:11,  1.36it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  18% Completed | 3/17 [00:02<00:10,  1.37it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  24% Completed | 4/17 [00:02<00:09,  1.37it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  29% Completed | 5/17 [00:03<00:08,  1.37it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  35% Completed | 6/17 [00:04<00:07,  1.38it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  41% Completed | 7/17 [00:05<00:07,  1.38it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  47% Completed | 8/17 [00:05<00:06,  1.37it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  53% Completed | 9/17 [00:06<00:05,  1.38it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  59% Completed | 10/17 [00:07<00:05,  1.38it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  65% Completed | 11/17 [00:08<00:04,  1.38it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  71% Completed | 12/17 [00:08<00:03,  1.38it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  76% Completed | 13/17 [00:09<00:02,  1.38it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  82% Completed | 14/17 [00:10<00:02,  1.38it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  88% Completed | 15/17 [00:10<00:01,  1.38it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  94% Completed | 16/17 [00:11<00:00,  1.39it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards: 100% Completed | 17/17 [00:12<00:00,  1.48it/s]
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards: 100% Completed | 17/17 [00:12<00:00,  1.39it/s]
+(EngineCore pid=559) 
+(EngineCore pid=559) INFO 09-03 10:58:17 [default_loader.py:430] Loading weights took 12.21 seconds
+(EngineCore pid=559) INFO 09-03 10:58:18 [model_runner.py:380] Model loading took 61.03 GiB memory and 14.009442 seconds
+(EngineCore pid=559) INFO 09-03 10:58:18 [topk_topp_sampler.py:62] Using FlashInfer for top-p & top-k sampling.
+(EngineCore pid=559) INFO 09-03 10:58:18 [startup_plan.py:153] Applying persisted startup plan (fingerprint 7fabb5d5393c6c8d): kv_cache_memory_bytes=6367723090 (5.93 GiB), recorded free-memory baseline 78.66 GiB, current 78.66 GiB. Memory profiling will be skipped.
+(EngineCore pid=559) INFO 09-03 10:58:18 [caching.py:343] reconstructed serializable fn from standalone compile artifacts. num_artifacts=3 num_submods=65
+(EngineCore pid=559) INFO 09-03 10:58:18 [decorators.py:311] Directly load AOT compilation from path /cache/vllm/torch_compile_cache/torch_aot_compile/deef01ac4e87c29a21357cbf1589e0e54181c077471bf35898bff15718b7d5aa/rank_0_0/model
+(EngineCore pid=559) INFO 09-03 10:58:18 [monitor.py:53] torch.compile took 0.32 s in total
+(EngineCore pid=559) INFO 09-03 10:58:19 [monitor.py:81] Initial profiling/warmup run took 0.26 s
+(EngineCore pid=559) INFO 09-03 10:58:20 [gpu_worker.py:506] Initial free memory 78.66 GiB, reserved 5.93 GiB memory for KV Cache as specified by kv_cache_memory_bytes config and skipped memory profiling. This does not respect the gpu_memory_utilization config. Only use kv_cache_memory_bytes config when you want manual control of KV cache memory size. If OOM'ed, check the difference of initial free memory between the current run and the previous run where kv_cache_memory_bytes is suggested and update it correspondingly.
+(EngineCore pid=559) INFO 09-03 10:58:20 [kv_cache_utils.py:1869] GPU KV cache size: 24,288 tokens, Maximum concurrency for 8,192 tokens per request: 2.96x
+(EngineCore pid=559) INFO 09-03 10:58:20 [kernel_warmup.py:260] Using FlashInfer autotune cache file: /cache/vllm/flashinfer_autotune_cache/0.6.16.post3/90a/688c04775d388d0a1f996125212e3629da372c17758551d8e172814d96f67b17/autotune_configs.json
+(EngineCore pid=559) 2026-09-03 10:58:20,729 - INFO - autotuner.py:2397 - flashinfer.jit: [Autotuner]: Loaded 0 configs from /cache/vllm/flashinfer_autotune_cache/0.6.16.post3/90a/688c04775d388d0a1f996125212e3629da372c17758551d8e172814d96f67b17/autotune_configs.json
+(EngineCore pid=559) 2026-09-03 10:58:20,731 - INFO - autotuner.py:829 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=559) 2026-09-03 10:58:20,754 - INFO - autotuner.py:852 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=559) 2026-09-03 10:58:20,768 - INFO - autotuner.py:2269 - flashinfer.jit: [Autotuner]: Saved 0 configs to /cache/vllm/flashinfer_autotune_cache/0.6.16.post3/90a/688c04775d388d0a1f996125212e3629da372c17758551d8e172814d96f67b17/autotune_configs.json (0 new, 0 from previous config)
+(EngineCore pid=559) Capturing CUDA graphs (PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (PIECEWISE):   2%|▏         | 1/51 [00:00<00:09,  5.14it/s]Capturing CUDA graphs (PIECEWISE):   4%|▍         | 2/51 [00:00<00:09,  5.41it/s]Capturing CUDA graphs (PIECEWISE):   6%|▌         | 3/51 [00:00<00:08,  5.59it/s]Capturing CUDA graphs (PIECEWISE):   8%|▊         | 4/51 [00:00<00:08,  5.73it/s]Capturing CUDA graphs (PIECEWISE):  10%|▉         | 5/51 [00:00<00:07,  5.84it/s]Capturing CUDA graphs (PIECEWISE):  12%|█▏        | 6/51 [00:01<00:07,  5.89it/s]Capturing CUDA graphs (PIECEWISE):  14%|█▎        | 7/51 [00:01<00:07,  5.99it/s]Capturing CUDA graphs (PIECEWISE):  16%|█▌        | 8/51 [00:01<00:07,  5.93it/s]Capturing CUDA graphs (PIECEWISE):  18%|█▊        | 9/51 [00:01<00:06,  6.01it/s]Capturing CUDA graphs (PIECEWISE):  20%|█▉        | 10/51 [00:01<00:06,  6.22it/s]Capturing CUDA graphs (PIECEWISE):  22%|██▏       | 11/51 [00:01<00:06,  6.42it/s]Capturing CUDA graphs (PIECEWISE):  24%|██▎       | 12/51 [00:01<00:05,  6.53it/s]Capturing CUDA graphs (PIECEWISE):  25%|██▌       | 13/51 [00:02<00:05,  6.52it/s]Capturing CUDA graphs (PIECEWISE):  27%|██▋       | 14/51 [00:02<00:05,  6.71it/s]Capturing CUDA graphs (PIECEWISE):  29%|██▉       | 15/51 [00:02<00:05,  6.91it/s]Capturing CUDA graphs (PIECEWISE):  31%|███▏      | 16/51 [00:02<00:04,  7.12it/s]Capturing CUDA graphs (PIECEWISE):  33%|███▎      | 17/51 [00:02<00:04,  7.38it/s]Capturing CUDA graphs (PIECEWISE):  35%|███▌      | 18/51 [00:02<00:04,  7.60it/s]Capturing CUDA graphs (PIECEWISE):  37%|███▋      | 19/51 [00:02<00:04,  7.69it/s]Capturing CUDA graphs (PIECEWISE):  39%|███▉      | 20/51 [00:03<00:03,  7.77it/s]Capturing CUDA graphs (PIECEWISE):  41%|████      | 21/51 [00:03<00:03,  7.78it/s]Capturing CUDA graphs (PIECEWISE):  43%|████▎     | 22/51 [00:03<00:03,  7.72it/s]Capturing CUDA graphs (PIECEWISE):  45%|████▌     | 23/51 [00:03<00:03,  7.73it/s]Capturing CUDA graphs (PIECEWISE):  47%|████▋     | 24/51 [00:03<00:03,  7.76it/s]Capturing CUDA graphs (PIECEWISE):  49%|████▉     | 25/51 [00:03<00:03,  7.70it/s]Capturing CUDA graphs (PIECEWISE):  51%|█████     | 26/51 [00:03<00:03,  7.58it/s]Capturing CUDA graphs (PIECEWISE):  53%|█████▎    | 27/51 [00:03<00:03,  7.68it/s]Capturing CUDA graphs (PIECEWISE):  55%|█████▍    | 28/51 [00:04<00:02,  7.72it/s]Capturing CUDA graphs (PIECEWISE):  57%|█████▋    | 29/51 [00:04<00:02,  7.90it/s]Capturing CUDA graphs (PIECEWISE):  59%|█████▉    | 30/51 [00:04<00:02,  7.95it/s]Capturing CUDA graphs (PIECEWISE):  61%|██████    | 31/51 [00:04<00:02,  7.97it/s]Capturing CUDA graphs (PIECEWISE):  63%|██████▎   | 32/51 [00:04<00:02,  7.99it/s]Capturing CUDA graphs (PIECEWISE):  65%|██████▍   | 33/51 [00:04<00:02,  8.04it/s]Capturing CUDA graphs (PIECEWISE):  67%|██████▋   | 34/51 [00:04<00:02,  8.15it/s]Capturing CUDA graphs (PIECEWISE):  69%|██████▊   | 35/51 [00:04<00:01,  8.24it/s]Capturing CUDA graphs (PIECEWISE):  71%|███████   | 36/51 [00:05<00:01,  8.24it/s]Capturing CUDA graphs (PIECEWISE):  73%|███████▎  | 37/51 [00:05<00:01,  8.27it/s]Capturing CUDA graphs (PIECEWISE):  75%|███████▍  | 38/51 [00:05<00:01,  8.27it/s]Capturing CUDA graphs (PIECEWISE):  76%|███████▋  | 39/51 [00:05<00:01,  8.28it/s]Capturing CUDA graphs (PIECEWISE):  78%|███████▊  | 40/51 [00:05<00:01,  8.34it/s]Capturing CUDA graphs (PIECEWISE):  80%|████████  | 41/51 [00:05<00:01,  8.32it/s]Capturing CUDA graphs (PIECEWISE):  82%|████████▏ | 42/51 [00:05<00:01,  8.38it/s]Capturing CUDA graphs (PIECEWISE):  84%|████████▍ | 43/51 [00:05<00:00,  8.30it/s]Capturing CUDA graphs (PIECEWISE):  86%|████████▋ | 44/51 [00:06<00:00,  8.31it/s]Capturing CUDA graphs (PIECEWISE):  88%|████████▊ | 45/51 [00:06<00:00,  8.42it/s]Capturing CUDA graphs (PIECEWISE):  90%|█████████ | 46/51 [00:06<00:00,  8.46it/s]Capturing CUDA graphs (PIECEWISE):  92%|█████████▏| 47/51 [00:06<00:00,  8.31it/s]Capturing CUDA graphs (PIECEWISE):  94%|█████████▍| 48/51 [00:06<00:00,  8.51it/s]Capturing CUDA graphs (PIECEWISE):  96%|█████████▌| 49/51 [00:06<00:00,  8.88it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 51/51 [00:06<00:00,  9.44it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 51/51 [00:06<00:00,  7.53it/s]
+(EngineCore pid=559) Capturing CUDA graphs (FULL):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (FULL):   4%|▍         | 2/51 [00:00<00:03, 13.41it/s]Capturing CUDA graphs (FULL):   8%|▊         | 4/51 [00:00<00:03, 13.97it/s]Capturing CUDA graphs (FULL):  12%|█▏        | 6/51 [00:00<00:03, 14.38it/s]Capturing CUDA graphs (FULL):  16%|█▌        | 8/51 [00:00<00:03, 14.05it/s]Capturing CUDA graphs (FULL):  20%|█▉        | 10/51 [00:00<00:02, 14.80it/s]Capturing CUDA graphs (FULL):  24%|██▎       | 12/51 [00:00<00:02, 15.44it/s]Capturing CUDA graphs (FULL):  27%|██▋       | 14/51 [00:00<00:02, 15.88it/s]Capturing CUDA graphs (FULL):  31%|███▏      | 16/51 [00:01<00:02, 16.64it/s]Capturing CUDA graphs (FULL):  35%|███▌      | 18/51 [00:01<00:01, 17.39it/s]Capturing CUDA graphs (FULL):  39%|███▉      | 20/51 [00:01<00:01, 17.97it/s]Capturing CUDA graphs (FULL):  43%|████▎     | 22/51 [00:01<00:01, 18.24it/s]Capturing CUDA graphs (FULL):  47%|████▋     | 24/51 [00:01<00:01, 18.61it/s]Capturing CUDA graphs (FULL):  51%|█████     | 26/51 [00:01<00:01, 18.86it/s]Capturing CUDA graphs (FULL):  57%|█████▋    | 29/51 [00:01<00:01, 19.43it/s]Capturing CUDA graphs (FULL):  63%|██████▎   | 32/51 [00:01<00:00, 19.91it/s]Capturing CUDA graphs (FULL):  67%|██████▋   | 34/51 [00:01<00:00, 19.92it/s]Capturing CUDA graphs (FULL):  73%|███████▎  | 37/51 [00:02<00:00, 20.47it/s]Capturing CUDA graphs (FULL):  78%|███████▊  | 40/51 [00:02<00:00, 20.87it/s]Capturing CUDA graphs (FULL):  84%|████████▍ | 43/51 [00:02<00:00, 21.29it/s]Capturing CUDA graphs (FULL):  90%|█████████ | 46/51 [00:02<00:00, 21.77it/s]Capturing CUDA graphs (FULL):  96%|█████████▌| 49/51 [00:02<00:00, 22.22it/s]Capturing CUDA graphs (FULL): 100%|██████████| 51/51 [00:02<00:00, 18.86it/s]
+(EngineCore pid=559) INFO 09-03 10:58:30 [model_runner.py:906] Graph capturing finished in 10 secs, took 1.84 GiB
+(EngineCore pid=559) INFO 09-03 10:58:33 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(EngineCore pid=559) WARNING 09-03 10:58:33 [torch_utils.py:250] OMP_NUM_THREADS=16 is set; leaving Torch threads at 16 for serving. Multi-threaded torch CPU ops during serving can degrade performance through spin-wait contention and cgroup CPU-quota throttling.
+(EngineCore pid=559) INFO 09-03 10:58:33 [core.py:347] init engine (profile, create kv cache, warmup model) took 15.54 s (compilation: 0.32 s)
+(EngineCore pid=559) INFO 09-03 10:58:34 [kernel.py:308] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(APIServer pid=440) INFO 09-03 10:58:34 [api_server.py:653] Supported tasks: ['generate']
+(APIServer pid=440) WARNING 09-03 10:58:34 [__init__.py:44] SECURITY WARNING: Development endpoints are enabled! This should NOT be used in production!
+(APIServer pid=440) INFO 09-03 10:58:35 [hf.py:551] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=440) WARNING 09-03 10:58:35 [model.py:1713] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.6, 'top_k': 20, 'top_p': 0.95}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+(APIServer pid=440) INFO 09-03 10:58:35 [api_server.py:657] Starting vLLM server on http://0.0.0.0:8010
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:51] Available routes are:
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /openapi.json, Methods: HEAD, GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /docs, Methods: HEAD, GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /redoc, Methods: HEAD, GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /load, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /version, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /health, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /metrics, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /tokenize, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /detokenize, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/models, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /ping, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /ping, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /invocations, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /reset_prefix_cache, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /reset_mm_cache, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /reset_encoder_cache, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /pause, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /resume, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /abort_requests, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /is_paused, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /init_weight_transfer_engine, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /start_weight_update, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /start_draft_weight_update, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /update_weights, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /finish_weight_update, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /update_weight_version, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /weight_info, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /get_world_size, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /collective_rpc, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /server_info, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /sleep, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /wake_up, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /is_sleeping, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /checkpoint_prepare, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /checkpoint_restore, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /reload_weights, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/chat/completions/batch, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/responses, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/completions, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/messages, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /generative_scoring, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/chat/completions/render, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/completions/render, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/chat/completions/derender, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /v1/completions/derender, Methods: POST
+(APIServer pid=440) INFO 09-03 10:58:35 [launcher.py:60] Route: /inference/v1/generate, Methods: POST
+(APIServer pid=440) INFO:     Started server process [440]
+(APIServer pid=440) INFO:     Waiting for application startup.
+(APIServer pid=440) INFO:     Application startup complete.
+(APIServer pid=440) INFO:     127.0.0.1:53580 - "GET /health HTTP/1.1" 200 OK
+(APIServer pid=440) INFO:     127.0.0.1:53594 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=559) INFO 09-03 10:58:36 [block_pool.py:793] Successfully reset prefix cache
+(EngineCore pid=559) INFO 09-03 10:58:36 [sleep_mode_backend.py:184] Using sleep-mode backend: cumem
+(APIServer pid=440) INFO 09-03 10:58:45 [loggers.py:310] Engine 000: Avg prompt throughput: 0.4 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+(APIServer pid=440) INFO 09-03 10:58:55 [loggers.py:310] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+(EngineCore pid=559) INFO 09-03 10:58:57 [cumem.py:278] CuMemAllocator: sleep freed 67.70 GiB memory in total, of which 61.68 GiB is backed up in CPU and the rest 6.02 GiB is discarded directly.
+(EngineCore pid=559) INFO 09-03 10:58:57 [gpu_worker.py:232] Sleep mode freed 70.13 GiB memory, 2.75 GiB memory is still in use.
+(EngineCore pid=559) INFO 09-03 10:58:57 [abstract.py:338] It took 21.109615 seconds to fall asleep.
+(APIServer pid=440) INFO:     127.0.0.1:53608 - "POST /sleep?level=1 HTTP/1.1" 200 OK
+(APIServer pid=440) INFO 09-03 10:59:46 [api_router.py:38] wake up the engine with tags: None
+(EngineCore pid=559) INFO 09-03 10:59:48 [abstract.py:356] It took 1.445191 seconds to wake up tags {'kv_cache', 'weights'}.
+(APIServer pid=440) INFO:     127.0.0.1:51048 - "POST /wake_up HTTP/1.1" 200 OK
+(APIServer pid=440) INFO:     127.0.0.1:51058 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=440) INFO:     127.0.0.1:51066 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=559) INFO 09-03 10:59:50 [block_pool.py:793] Successfully reset prefix cache
+(EngineCore pid=559) INFO 09-03 10:59:50 [cumem.py:278] CuMemAllocator: sleep freed 67.70 GiB memory in total, of which 0.00 GiB is backed up in CPU and the rest 67.70 GiB is discarded directly.
+(EngineCore pid=559) INFO 09-03 10:59:50 [gpu_worker.py:232] Sleep mode freed 67.72 GiB memory, 2.75 GiB memory is still in use.
+(EngineCore pid=559) INFO 09-03 10:59:50 [abstract.py:338] It took 0.057928 seconds to fall asleep.
+(APIServer pid=440) INFO:     127.0.0.1:51080 - "POST /sleep?level=2 HTTP/1.1" 200 OK
+(APIServer pid=440) INFO 09-03 10:59:50 [api_router.py:38] wake up the engine with tags: None
+(EngineCore pid=559) INFO 09-03 10:59:50 [abstract.py:356] It took 0.284580 seconds to wake up tags {'kv_cache', 'weights'}.
+(APIServer pid=440) INFO:     127.0.0.1:51094 - "POST /wake_up HTTP/1.1" 200 OK
+(APIServer pid=440) INFO:     127.0.0.1:51100 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=559) INFO 09-03 10:59:51 [gpu_model_runner.py:5694] Reloading weights inplace...
+(EngineCore pid=559) [cs_fst] ParallelLoader override: {'nogds': True, 'max_threads': 8, 'bbuf_size_kb': 32768} (was {'nogds': False, 'max_threads': None, 'bbuf_size_kb': None}, gds=False)
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:   0% Completed | 0/17 [00:00<?, ?it/s]
+(EngineCore pid=559) WARNING 09-03 10:59:52 [layerwise.py:210] Allocating 94.4 MB of device memory to buffers to load ['QKVParallelLinear', 'RowParallelLinear'] layers. This extra memory usage can be avoided by ordering weights by their parent layer when reloading.
+(EngineCore pid=559) WARNING 09-03 10:59:52 [layerwise.py:210] Allocating 10.5 MB of device memory to buffers to load ['QKVParallelLinear', 'RMSNorm'] layers. This extra memory usage can be avoided by ordering weights by their parent layer when reloading.
+(EngineCore pid=559) WARNING 09-03 10:59:52 [layerwise.py:210] Allocating 262.1 MB of device memory to buffers to load ['MergedColumnParallelLinear', 'RMSNorm'] layers. This extra memory usage can be avoided by ordering weights by their parent layer when reloading.
+(EngineCore pid=559) WARNING 09-03 10:59:52 [layerwise.py:210] Allocating 272.6 MB of device memory to buffers to load ['MergedColumnParallelLinear', 'QKVParallelLinear'] layers. This extra memory usage can be avoided by ordering weights by their parent layer when reloading.
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:   6% Completed | 1/17 [00:00<00:12,  1.32it/s]
+(EngineCore pid=559) WARNING 09-03 10:59:52 [layerwise.py:210] Allocating 262.2 MB of device memory to buffers to load ['MergedColumnParallelLinear', 'RMSNorm'] layers. This extra memory usage can be avoided by ordering weights by their parent layer when reloading.
+(EngineCore pid=559) WARNING 09-03 10:59:52 [layerwise.py:210] Allocating 524.3 MB of device memory to buffers to load ['MergedColumnParallelLinear', 'RowParallelLinear'] layers. This extra memory usage can be avoided by ordering weights by their parent layer when reloading.
+[rank0]:[W903 10:59:52.062495838 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 3902799872 bytes (free: 2282029056, total: 85017624576).
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  12% Completed | 2/17 [00:01<00:11,  1.35it/s]
+(EngineCore pid=559) WARNING 09-03 10:59:53 [layerwise.py:210] Allocating 524.3 MB of device memory to buffers to load ['MergedColumnParallelLinear', 'MergedColumnParallelLinear'] layers. This extra memory usage can be avoided by ordering weights by their parent layer when reloading.
+[rank0]:[W903 10:59:53.785781833 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 3902799872 bytes (free: 1040515072, total: 85017624576).
+[rank0]:[W903 10:59:53.788204088 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 3902799872 bytes (free: 1407516672, total: 85017624576).
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 4 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 5 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 6 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 7 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 8 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 9 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 10 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 11 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 12 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 13 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 14 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 15 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.614 - Producer batch 16 skipped: stop_event-False or error_event-True,error_info-Producer batch 3 failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  18% Completed | 3/17 [00:02<00:10,  1.37it/s]
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.616 - get batch_item is Exception, will raise
+(EngineCore pid=559) Loading fastsafetensors checkpoint shards:  18% Completed | 3/17 [00:02<00:10,  1.36it/s]
+(EngineCore pid=559) 
+(EngineCore pid=559) [PG0] 2026-09-03 10:59:53.616 - Consumer error: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581] Invocation of collective_rpc method failed
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581] Traceback (most recent call last):
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 1571, in _invoke_utility_method
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     result = get_result()
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]              ^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 1526, in <lambda>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     and method(*self._convert_msgspec_args(method, args))
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 959, in collective_rpc
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/executor/uniproc_executor.py", line 103, in collective_rpc
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     result = run_method(self.driver_worker, method, args, kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/serial_utils.py", line 510, in run_method
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     return func(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_worker.py", line 472, in reload_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     self.model_runner.reload_weights(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/model_runner.py", line 466, in reload_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py", line 5698, in reload_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     loaded_weights = model.load_weights(weights_iterator)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3.py", line 342, in load_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     return loader.load_weights(weights)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/reload/torchao_decorator.py", line 50, in patched_model_load_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     return original_load_weights(self, weights, *args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 423, in load_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     autoloaded_weights = set(self._load_module("", self.module, weights))
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 357, in _load_module
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     yield from self._load_module(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 330, in _load_module
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     loaded_params = module_load_weights(weights)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen2.py", line 438, in load_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/reload/torchao_decorator.py", line 50, in patched_model_load_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     return original_load_weights(self, weights, *args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 423, in load_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     autoloaded_weights = set(self._load_module("", self.module, weights))
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 357, in _load_module
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     yield from self._load_module(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 357, in _load_module
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     yield from self._load_module(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 357, in _load_module
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     yield from self._load_module(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   [Previous line repeated 1 more time]
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 336, in _load_module
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     yield from map(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/linear.py", line 1296, in load_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     for name, loaded_weight in weights:
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 230, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 220, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     weights_by_parts = (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                        ^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 230, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 220, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     weights_by_parts = (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                        ^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 230, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 220, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     weights_by_parts = (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                        ^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 230, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 220, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     weights_by_parts = (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                        ^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 419, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     weights = (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]               ^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 139, in apply
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     for name, data in weights:
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 230, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 220, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     weights_by_parts = (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                        ^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/utils.py", line 419, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     weights = (
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]               ^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/default_loader.py", line 333, in get_all_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     yield from self._get_weights_iterator(primary_weights)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/default_loader.py", line 319, in <genexpr>
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     return ((source.prefix + name, tensor) for (name, tensor) in weights_iterator)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/weight_utils.py", line 1082, in fastsafetensors_weights_iterator
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     for name, tensor in pl.iterate_weights():
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/fastsafetensors/parallel_loader.py", line 422, in iterate_weights
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     yield from self._consumer_worker()
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/fastsafetensors/parallel_loader.py", line 388, in _consumer_worker
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     yield from self._consume_single_batch()
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/fastsafetensors/parallel_loader.py", line 337, in _consume_single_batch
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     raise batch_item
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/fastsafetensors/parallel_loader.py", line 275, in _load_single_batch
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     fb = self.loader.copy_files_to_device()
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/fastsafetensors/loader.py", line 193, in copy_files_to_device
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     factory.submit_io(use_buf_register, max_copy_block_size)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/fastsafetensors/tensor_factory.py", line 44, in submit_io
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     self.gbuf = self.copier.submit_io(use_buf_register, max_copy_block_size)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/fastsafetensors/copier/nogds.py", line 59, in submit_io
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     gbuf = self.framework.alloc_tensor_memory(total_length, self.device)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/fastsafetensors/frameworks/_torch.py", line 245, in alloc_tensor_memory
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     rbuf = torch.cuda.caching_allocator_alloc(length)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]   File "/usr/local/lib/python3.12/dist-packages/torch/cuda/memory.py", line 135, in caching_allocator_alloc
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]     return torch._C._cuda_cudaCachingAllocator_raw_alloc(size, stream)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1581] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(APIServer pid=440) ERROR 09-03 10:59:53 [exception.py:16] Exception caught. Request id: None
+(APIServer pid=440) INFO:     127.0.0.1:51108 - "POST /reload_weights HTTP/1.1" 500 Internal Server Error
+(APIServer pid=440) ERROR:    Exception in ASGI application
+(APIServer pid=440) Traceback (most recent call last):
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/uvicorn/protocols/http/httptools_impl.py", line 422, in run_asgi
+(APIServer pid=440)     result = await app(  # type: ignore[func-returns-value]
+(APIServer pid=440)              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/uvicorn/middleware/proxy_headers.py", line 63, in __call__
+(APIServer pid=440)     return await self.app(scope, receive, send)
+(APIServer pid=440)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/fastapi/applications.py", line 1159, in __call__
+(APIServer pid=440)     await super().__call__(scope, receive, send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/applications.py", line 96, in __call__
+(APIServer pid=440)     await self.middleware_stack(scope, receive, send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/middleware/errors.py", line 186, in __call__
+(APIServer pid=440)     raise exc
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/middleware/errors.py", line 164, in __call__
+(APIServer pid=440)     await self.app(scope, receive, _send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/middleware/cors.py", line 88, in __call__
+(APIServer pid=440)     await self.app(scope, receive, send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/prometheus_fastapi_instrumentator/middleware.py", line 180, in __call__
+(APIServer pid=440)     raise exc
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/prometheus_fastapi_instrumentator/middleware.py", line 178, in __call__
+(APIServer pid=440)     await self.app(scope, receive, send_wrapper)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/middleware/exceptions.py", line 63, in __call__
+(APIServer pid=440)     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+(APIServer pid=440)     raise exc
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+(APIServer pid=440)     await app(scope, receive, sender)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+(APIServer pid=440)     await self.app(scope, receive, send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/routing.py", line 670, in __call__
+(APIServer pid=440)     await self.middleware_stack(scope, receive, send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/routing.py", line 690, in app
+(APIServer pid=440)     await route.handle(scope, receive, send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/routing.py", line 280, in handle
+(APIServer pid=440)     await self.app(scope, receive, send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/fastapi/routing.py", line 134, in app
+(APIServer pid=440)     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+(APIServer pid=440)     raise exc
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+(APIServer pid=440)     await app(scope, receive, sender)
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/fastapi/routing.py", line 120, in app
+(APIServer pid=440)     response = await f(request)
+(APIServer pid=440)                ^^^^^^^^^^^^^^^^
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/fastapi/routing.py", line 674, in app
+(APIServer pid=440)     raw_response = await run_endpoint_function(
+(APIServer pid=440)                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/fastapi/routing.py", line 328, in run_endpoint_function
+(APIServer pid=440)     return await dependant.call(**values)
+(APIServer pid=440)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440)   File "/tmp/coldstart-demo/cs_dev_routes.py", line 92, in reload_weights
+(APIServer pid=440)     await engine_client(raw_request).collective_rpc("reload_weights")
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/async_llm.py", line 1020, in collective_rpc
+(APIServer pid=440)     return await self.engine_core.collective_rpc_async(
+(APIServer pid=440)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core_client.py", line 1228, in collective_rpc_async
+(APIServer pid=440)     return await self.call_utility_async(
+(APIServer pid=440)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core_client.py", line 1129, in call_utility_async
+(APIServer pid=440)     return await self._call_utility_async(method, *args, engine=self.core_engine)
+(APIServer pid=440)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core_client.py", line 1143, in _call_utility_async
+(APIServer pid=440)     return await future
+(APIServer pid=440)            ^^^^^^^^^^^^
+(APIServer pid=440) Exception: Call to collective_rpc method failed: CUDA out of memory. Tried to allocate 3.63 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.31 GiB is free. Process 957 has 72.87 GiB memory in use. Of the allocated memory 75.00 GiB is allocated by PyTorch, with 3.32 GiB allocated in private pools (e.g., CUDA Graphs), and 3.46 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [dump_input.py:72] Dumping input data for V1 LLM engine (v0.28.0) with config: model='Qwen/Qwen3-32B', speculative_config=None, tokenizer='Qwen/Qwen3-32B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=main, tokenizer_revision=main, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=8192, download_dir=None, load_format=fastsafetensors, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=Qwen/Qwen3-32B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'ir_enable_torch_wrap': True, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::qwen_gdn_attention_core', 'vllm::qwen_gdn_attention_core_fused_norm_packed', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 512, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': '/cache/vllm/torch_compile_cache/torch_aot_compile/deef01ac4e87c29a21357cbf1589e0e54181c077471bf35898bff15718b7d5aa', 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, enable_jit_warmup=True, enable_bf16x3_router_gemm=False, moe_backend='auto', linear_backend='auto'), 
+(EngineCore pid=559) ERROR 09-03 10:59:53 [dump_input.py:79] Dumping scheduler output for model execution: SchedulerOutput(scheduled_new_reqs=[NewRequestData(req_id=cmpl-974a9c0bc1be75e1-0-8234ee05,prompt_token_ids_len=5,prefill_token_ids_len=5,mm_features=[],sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], thinking_token_budget=None, include_stop_str_in_output=False, ignore_eos=False, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, structured_outputs=None, extra_args=None),block_ids=([9],),num_computed_tokens=0,lora_request=None,prompt_embeds_shape=None)], scheduled_cached_reqs=CachedRequestData(req_ids=[],resumed_req_ids=set(),new_token_ids_lens=[],all_token_ids_lens={},new_block_ids=[],num_computed_tokens=[],num_output_tokens=[]), num_scheduled_tokens={cmpl-974a9c0bc1be75e1-0-8234ee05: 5}, total_num_scheduled_tokens=5, scheduled_spec_decode_tokens={}, scheduled_encoder_inputs={}, num_common_prefix_blocks=[1], finished_req_ids=[], free_encoder_mm_hashes=[], scheduled_encoder_input_stats=null, preempted_req_ids=[], has_structured_output_requests=false, pending_structured_output_tokens=false, num_invalid_spec_tokens=null, kv_connector_metadata=null, ec_connector_metadata=null, ec_manager_metadata=null, new_block_ids_to_zero=null, kv_cache_block_copies=null, partial_tail_offloads=null, num_spec_tokens_to_schedule=0)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [dump_input.py:81] Dumping scheduler stats: SchedulerStats(num_running_reqs=1, num_waiting_reqs=0, num_skipped_waiting_reqs=0, step_counter=0, current_wave=0, kv_cache_usage=0.0006591957811470373, iteration_details=None, prefix_cache_stats=PrefixCacheStats(reset=False, requests=1, queries=5, hits=0, preempted_requests=0, preempted_queries=0, preempted_hits=0), connector_prefix_cache_stats=None, kv_cache_eviction_events=[], spec_decoding_stats=None, kv_connector_stats=None, waiting_lora_adapters={}, running_lora_adapters={}, cudagraph_stats=None, perf_stats=None)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348] EngineCore encountered a fatal error.
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348] Traceback (most recent call last):
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 1339, in run_engine_core
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     engine_core.run_busy_loop()
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/fault_tolerance/engine_core_sentinel.py", line 179, in run_with_fault_tolerance
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     busy_loop_func(self)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 1383, in run_busy_loop
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     self._process_engine_step()
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 1436, in _process_engine_step
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     outputs, model_executed = self.step_fn()
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]                               ^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 654, in step_with_batch_queue
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     exec_future = self.model_executor.execute_model(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/executor/uniproc_executor.py", line 131, in execute_model
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     output.result()
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return self.__get_result()
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     raise self._exception
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/executor/uniproc_executor.py", line 109, in collective_rpc
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     result = run_method(self.driver_worker, method, args, kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/serial_utils.py", line 510, in run_method
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return func(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/worker_base.py", line 355, in execute_model
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return self.worker.execute_model(scheduler_output)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return func(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_worker.py", line 1113, in execute_model
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     output = self.model_runner.execute_model(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return func(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/model_runner.py", line 1661, in execute_model
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     model_output = self.cudagraph_manager.run_pw_graph(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/cudagraph_utils.py", line 436, in run_pw_graph
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return model(**model_inputs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return self._call_impl(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return forward_call(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3.py", line 325, in forward
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     hidden_states = self.model(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]                     ^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/compilation/decorators.py", line 520, in __call__
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return self.aot_compiled_fn(self, *args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/torch/_dynamo/aot_compile.py", line 244, in __call__
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return self.fn(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen2.py", line 397, in forward
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     def forward(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/compilation/caching.py", line 225, in __call__
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return self.optimized_call(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "<string>", line 333, in execution_fn
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "<string>", line 5, in __vllm_inlined_submods__1
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/torch/_ops.py", line 1279, in __call__
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return self._op(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/attention/attention.py", line 716, in unified_kv_cache_update
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/flash_attn.py", line 1203, in do_kv_cache_update
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     reshape_and_cache_flash(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/vllm/_custom_ops.py", line 2641, in reshape_and_cache_flash
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     torch.ops._C_cache_ops.reshape_and_cache_flash(
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]   File "/usr/local/lib/python3.12/dist-packages/torch/_ops.py", line 1279, in __call__
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]     return self._op(*args, **kwargs)
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=559) ERROR 09-03 10:59:53 [core.py:1348] NotImplementedError: _C_cache_ops::reshape_and_cache_flash: attempted to run this operator with Meta tensors, but there was no fake impl or Meta kernel registered. You may have run into this message while using an operator with PT2 compilation APIs (torch.compile/torch.export); in order to use this operator with those APIs you'll need to add a fake impl. Please see the following for next steps:  https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html
+(APIServer pid=440) ERROR 09-03 10:59:53 [async_llm.py:744] AsyncLLM output_handler failed.
+(APIServer pid=440) ERROR 09-03 10:59:53 [async_llm.py:744] Traceback (most recent call last):
+(APIServer pid=440) ERROR 09-03 10:59:53 [async_llm.py:744]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/async_llm.py", line 690, in output_handler
+(APIServer pid=440) ERROR 09-03 10:59:53 [async_llm.py:744]     outputs = await engine_core.get_output_async()
+(APIServer pid=440) ERROR 09-03 10:59:53 [async_llm.py:744]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [async_llm.py:744]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core_client.py", line 1104, in get_output_async
+(APIServer pid=440) ERROR 09-03 10:59:53 [async_llm.py:744]     raise self._format_exception(outputs) from None
+(APIServer pid=440) ERROR 09-03 10:59:53 [async_llm.py:744] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57] Engine Exception caught. Request id: cmpl-974a9c0bc1be75e1
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57] Traceback (most recent call last):
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     await app(scope, receive, sender)
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/fastapi/routing.py", line 120, in app
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     response = await f(request)
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]                ^^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/fastapi/routing.py", line 674, in app
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     raw_response = await run_endpoint_function(
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/fastapi/routing.py", line 328, in run_endpoint_function
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     return await dependant.call(**values)
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/serve/utils/api_utils.py", line 90, in wrapper
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     return handler_task.result()
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/serve/utils/api_utils.py", line 111, in wrapper
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     return await func(*args, **kwargs)
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/completion/api_router.py", line 54, in create_completion
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     generator = await handler.create_completion(request, raw_request)
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/completion/serving.py", line 125, in create_completion
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     return await self._with_kv_transfer_rejection_cleanup(
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/generate/base/serving.py", line 268, in _with_kv_transfer_rejection_cleanup
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     return await awaitable
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]            ^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/completion/serving.py", line 244, in _create_completion
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     async for i, res in result_generator:
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/utils/async_utils.py", line 108, in merge_async_iterators
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     async for item in iterator:  # type: ignore[union-attr]
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/async_llm.py", line 607, in generate
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     out = q.get_nowait() or await q.get()
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]                             ^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/output_processor.py", line 87, in get
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     raise output
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/async_llm.py", line 690, in output_handler
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     outputs = await engine_core.get_output_async()
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core_client.py", line 1104, in get_output_async
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57]     raise self._format_exception(outputs) from None
+(APIServer pid=440) ERROR 09-03 10:59:53 [vllm_error.py:57] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+(APIServer pid=440) INFO:     127.0.0.1:52106 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error
+(APIServer pid=440) INFO:     Shutting down
+(APIServer pid=440) INFO:     Waiting for application shutdown.
+(APIServer pid=440) INFO:     Application shutdown complete.
+(APIServer pid=440) INFO:     Finished server process [440]
+(APIServer pid=440) INFO 09-03 10:59:53 [core_client.py:689] [shutdown] MPClient: start timeout=0s
+(APIServer pid=440) INFO 09-03 10:59:53 [core_client.py:691] [shutdown] MPClient: stopping engine manager
+(APIServer pid=440) INFO 09-03 10:59:53 [utils.py:615] [shutdown] Process manager: send sigterm to process EngineCore
+(APIServer pid=440) WARNING 09-03 10:59:53 [utils.py:635] [shutdown] Process manager: force killing remaining processes count=1
+(APIServer pid=440) WARNING 09-03 10:59:53 [utils.py:640] [shutdown] Process manager: force killing remaining process EngineCore pid 559
+(APIServer pid=440) INFO 09-03 10:59:53 [core_client.py:693] [shutdown] MPClient: engine manager stopped
+(APIServer pid=440) INFO 09-03 10:59:53 [core_client.py:694] [shutdown] MPClient: cleaning up background resources
+(APIServer pid=440) INFO 09-03 10:59:53 [core_client.py:696] [shutdown] MPClient: complete
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

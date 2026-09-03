@@ -48,3 +48,32 @@ GPU1=GPU-76d064d9-54fe-e1b7-2167-200055e3b401
       TP=2 leg stopped here. Steps 4-8 (second tenant B, stop B, identity
       restore, /checkpoint_restore, final wake+correctness, teardown) were not
       attempted, since they all depend on step 3s checkpoint succeeding.
+
+------------------------------------------------------------------------------
+CORRECTION (added after the root-cause investigation; the transcript above is
+the raw run and is left as recorded)
+------------------------------------------------------------------------------
+      Two claims in the ANOMALY block are wrong.
+      1. "mutual wait on each other ... because only one rank was ever
+         mid-checkpoint at a time" -- no. The mechanism is not rank-to-rank and
+         not ordering-dependent. scripts/cuda-checkpoint-ipc-matrix.py
+         reproduces the same hang with --parallel (both ranks mid-checkpoint
+         simultaneously), and reproduces it with only ONE child ever touched, as
+         long as that child holds a live NCCL communicator or torch symmetric
+         memory. The futex_wait_queue in wchan is a symptom of the wedged
+         driver call holding the per-process checkpoint lock, not a deadlock
+         between the ranks.
+      2. "the new /checkpoint_prepare route correctly tearing down NCCL
+         communicators first" -- it does not tear down NCCL at all.
+         CudaCommunicator.checkpoint_prepare (cuda_communicator.py:588)
+         releases only the FlashInfer all-reduce workspace and the FlashInfer
+         all2all manager: "Only FlashInfer all-reduce and FlashInfer all2all
+         are supported for now". This run's dispatch chain was
+         ['CUSTOM', 'SYMM_MEM', 'PYNCCL'] and pynccl_comm is built
+         unconditionally at world_size>1, so the 0.06s call freed nothing that
+         mattered -- which is exactly why it looked like a success.
+      The actual root cause, the isolating matrix, and the deeper conflict
+      (releasing the NCCL comm requires destroying the captured CUDA graphs
+      that sleep level 1 exists to preserve) are written up in
+      docs/sleep-mode.md. A bounded re-run that forces the one backend with a
+      stable-VA detach is reports/tp2-park-flashinfer-20260903-130336.txt.

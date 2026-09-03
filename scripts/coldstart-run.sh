@@ -31,6 +31,13 @@ USE_PROBE=1
 COLD_COMPILE=0
 COLD_HF=0
 GRACE=20
+# Seconds to wait for the driver to report no process holding a GPU between
+# repeats. Polled, not slept: see the drain loop in run_once.
+GPU_DRAIN=60
+# A drained H100 reads 0 MiB here; allow a little slack for anything else
+# sharing the device.
+DRAIN_MIB=1024
+ALLOW_CONCURRENT=0
 VLLM_BIN="${CS_VLLM_BIN:-vllm}"
 
 die() { echo "coldstart-run: $*" >&2; exit 2; }
@@ -45,6 +52,9 @@ while [[ $# -gt 0 ]]; do
     --probe-dir) PROBE_DIR="$2"; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --grace) GRACE="$2"; shift 2 ;;
+    --gpu-drain) GPU_DRAIN="$2"; shift 2 ;;
+    --drain-mib) DRAIN_MIB="$2"; shift 2 ;;
+    --allow-concurrent) ALLOW_CONCURRENT=1; shift ;;
     --first-token) FIRST_TOKEN=1; shift ;;
     --no-first-token) FIRST_TOKEN=0; shift ;;
     --no-probe) USE_PROBE=0; shift ;;
@@ -90,6 +100,37 @@ ensure_dirs() {
   done
 }
 ensure_dirs
+
+# Refuse to run alongside another copy of this script.
+#
+# Stopping the *client* that launched a run (Ctrl-C, a killed `kubectl exec`, a
+# task runner cancelling the local process) does NOT stop this script inside the
+# pod: it keeps cycling repeats, launching vLLM and taking ~63 GiB each time. A
+# second run started afterwards then competes for the same GPUs and fails with
+# "Free memory on device cuda:0 (12.94/79.18 GiB) ... less than desired GPU
+# memory utilization" -- or, worse, survives with a different memory budget and
+# records a measurement that is quietly not comparable. That happened; the
+# symptom looked like a teardown race and was not one.
+#
+# So check for a live sibling and stop, naming the pids, rather than producing
+# numbers that silently share a device.
+preflight_exclusive() {
+  local self="$$" others=""
+  local p
+  for p in $(pgrep -f "coldstart-run[.]sh" 2>/dev/null); do
+    [[ "$p" == "$self" || "$p" == "$PPID" ]] && continue
+    others="$others $p"
+  done
+  [[ -z "${others// /}" ]] && return 0
+  echo "coldstart-run: another coldstart-run.sh is already running in this" >&2
+  echo "    container (pid(s):$others). Two harnesses on one GPU produce" >&2
+  echo "    measurements that share a device without saying so." >&2
+  echo "    Inspect with: pgrep -af 'coldstart-run[.]sh'" >&2
+  echo "    Then either wait for it, or: pkill -9 -f 'coldstart-run[.]sh'" >&2
+  echo "    Pass --allow-concurrent to override (it will not be comparable)." >&2
+  exit 3
+}
+[[ "$ALLOW_CONCURRENT" == 1 ]] || preflight_exclusive
 
 cache_dirs() {
   # Compile caches only: these are what a warm re-run gets for free.
@@ -196,7 +237,50 @@ run_once() {
   wait "$vllm_pid" 2>/dev/null
 
   # Free the GPU fully before the next iteration.
-  sleep 3
+  #
+  # Waiting on the launcher pid is not enough. At TP>1 the workers are separate
+  # processes that setproctitle-rename themselves to "VLLM::Worker_TPn", so they
+  # are neither the launcher nor matched by a name-based kill, and they can still
+  # hold tens of GiB after the launcher is gone. A fixed `sleep 3` then hands the
+  # next iteration a GPU that is not actually free, and vLLM refuses to start
+  # with "Free memory on device cuda:0 ... is less than desired GPU memory
+  # utilization" -- or, worse, starts with a different memory budget and yields a
+  # measurement that is quietly not comparable. So poll the driver for the real
+  # answer instead of guessing, and SIGKILL whatever is still holding on.
+  # Gate the next repeat on the GPU actually being free, rather than on a fixed
+  # sleep. Waiting on the launcher pid alone is not enough at TP>1: the workers
+  # are separate processes that setproctitle-rename themselves to
+  # "VLLM::Worker_TPn", so they are neither the launcher nor matched by a
+  # name-based kill, and they can outlive it while still holding tens of GiB.
+  #
+  # Poll memory.used rather than the process list, because that is the quantity
+  # vLLM's own startup check reads (it refuses to start when free memory is below
+  # gpu_memory_utilization). A pid can leave the driver's compute-apps list
+  # before its memory is reclaimed, so the process list can read empty a moment
+  # early. Kill stragglers by pid as a best effort; believe the memory number.
+  local gwaited=0 used=""
+  while [[ "$gwaited" -lt "$GPU_DRAIN" ]]; do
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
+             | tr -d ' ' | sort -rn | head -1)
+    [[ -n "$used" ]] || break            # no nvidia-smi: nothing to gate on
+    [[ "$used" -le "$DRAIN_MIB" ]] && break
+    if [[ "$gwaited" -ge 10 ]]; then
+      local h
+      for h in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d ' '); do
+        kill -KILL "$h" 2>/dev/null
+      done
+    fi
+    sleep 1; gwaited=$((gwaited + 1))
+  done
+  if [[ -n "$used" && "$used" -gt "$DRAIN_MIB" ]]; then
+    echo "!! GPU still holds ${used} MiB after ${GPU_DRAIN}s; the next run would" >&2
+    echo "   start with a different memory budget. Failing this iteration rather" >&2
+    echo "   than recording an incomparable one." >&2
+    rc=1
+  else
+    [[ "$gwaited" -gt 3 ]] && echo "   (GPU drained to ${used:-?} MiB in ${gwaited}s)"
+  fi
+  sleep 2
   return $rc
 }
 

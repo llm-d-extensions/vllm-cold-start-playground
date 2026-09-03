@@ -286,28 +286,109 @@ process **inside the same pod**, by restoring the snapshot onto a different card
 That is measured in [Restoring onto a different GPU](#restoring-onto-a-different-gpu)
 below.
 
-**TP>1 is not just untested — it deadlocks.** `Worker.checkpoint_prepare` /
-`checkpoint_restore` (`gpu_worker.py:261`) exist precisely to tear down and
-rebuild device communicators around a checkpoint, and calling them is
-necessary but not sufficient. Wiring them up as HTTP routes
-(`coldstart/cs_dev_routes.py`, `POST /checkpoint_prepare` /
-`/checkpoint_restore`) and exercising the whole sequence on a warmed
-Qwen3-32B, TP=2 engine (2×H100, both `WorkerProc` ranks) reproduces the
-composition for real up to a point, then hangs: `/sleep?level=1` and
-`/checkpoint_prepare` both complete normally (11.36s and 0.06s), but
-`cuda-checkpoint --action checkpoint` against the first rank's pid then hangs
-indefinitely — confirmed stuck for 29+ minutes, not slow. Killing the stuck
-client lets the driving script advance to the second rank, whose checkpoint
-attempt hangs the same way. `/proc/<pid>/wchan` on both `WorkerProc`s shows
-`futex_wait_queue` — a mutual wait, each rank blocked on cross-process GPU/IPC
-state the other cannot supply while only one rank at a time is mid-checkpoint.
-A direct `/wake_up`, bypassing `cuda-checkpoint` entirely, also fails: the
-connection dies after a 30s timeout. The whole process tree has to be
-`SIGKILL`ed to recover; afterwards `nvidia-smi` cleanly reads 0 MiB on both
-GPUs, so the wedge is a process-synchronization deadlock, not an unrecoverable
-driver state — but as shipped, the compose-with-TP>1 story in this document
-does not complete end to end. Full transcript:
-`reports/demo-cold-start-tp2-20260903-110308.txt`.
+**TP>1 is not just untested — it deadlocks, and the reason is structural.**
+Wiring `Worker.checkpoint_prepare` / `checkpoint_restore` (`gpu_worker.py:261`)
+up as HTTP routes (`coldstart/cs_dev_routes.py`) and running the whole sequence
+on a warmed Qwen3-32B TP=2 engine (2×H100, NVLink) reproduces the composition up
+to a point and then hangs: `/sleep?level=1` and `/checkpoint_prepare` both
+complete normally (11.36s and 0.06s), then `cuda-checkpoint --action checkpoint`
+against the first rank's pid blocks — confirmed stuck for 29+ minutes, not slow.
+Subsequent `--get-state` calls on the same pid block too, so the driver's
+per-process checkpoint lock is held by the wedged call, not merely by the client.
+Full transcript: `reports/demo-cold-start-tp2-20260903-110308.txt`.
+
+Bisecting that with real vLLM boots costs ~90s a trial and moves a dozen
+variables at once, so `scripts/cuda-checkpoint-ipc-matrix.py` reproduces it
+without vLLM: two spawned children, one GPU each, each holding exactly *one*
+kind of cross-rank state, then the same lock → checkpoint → restore → unlock
+sequence. Measured on driver 580.105.08:
+
+| cross-rank state held by the process | `checkpoint` | `restore` |
+| --- | --- | --- |
+| none (control) | ok, 0.37s / 0.41s → 0 MiB | ok, compute verified |
+| `cuIpcOpenMemHandle` peer mapping live | ok, 0.62s / 0.67s → 0 MiB | **fails: `"invalid argument"`** |
+| … peer mapping freed first | ok | ok, verified |
+| **live NCCL communicator** | **hangs** | — |
+| … `destroy_process_group()` first | ok, 0.46s / 0.52s | ok, verified |
+| **torch symmetric memory live** | **hangs** | — |
+| **CUDA graph with an all-reduce kept, then destroy** | `destroy_process_group()` **never returned in 30s** → **hangs** | — |
+| … graph dropped first, then destroy | destroy 0.19s, checkpoint 0.47s → 0 MiB | ok, verified |
+
+That pins the root cause to three facts that compose badly:
+
+1. **`checkpoint_prepare` does not release what TP actually holds.**
+   `CudaCommunicator.checkpoint_prepare` (`cuda_communicator.py:588`) calls
+   exactly two things — `checkpoint_prepare_fi_ar_workspaces()` and
+   `all2all_manager.checkpoint_prepare()` — under its own comment, *"Only
+   FlashInfer all-reduce and FlashInfer all2all are supported for now"*. The
+   stock all-reduce dispatch chain on this node logs as
+   `Using ['CUSTOM', 'SYMM_MEM', 'PYNCCL'] all-reduce backends`, and
+   `pynccl_comm` is built unconditionally whenever `world_size > 1`. None of
+   those three is released. Hence 0.06s and 0 MiB freed: the call succeeds
+   having done nothing that matters, which is why it reads as a working
+   teardown right up to the hang.
+2. **Live NCCL state, or torch symmetric memory, is enough to wedge the driver
+   on its own** — rows 4 and 6 above, with nothing else shared. Releasing it
+   first is sufficient to fix the checkpoint (rows 5 and 8). A live `cuIpc`
+   mapping — mechanically what `CUSTOM` all-reduce uses — is subtler: it
+   checkpoints *fine* and then fails to **restore**, which is consistent with
+   `cuda-checkpoint`'s own README (`cuIpcGetMemHandle`-based checkpointing is a
+   driver-610 feature; `cuMemExportToShareableHandle` memory, which is what
+   symmetric memory allocates, is listed unsupported outright).
+3. **Releasing the NCCL communicator requires destroying the CUDA graphs
+   first**, and those graphs are the entire reason sleep level 1 exists.
+   vLLM says so itself at `pynccl.py:148`: `ncclCommAbort` "can block until all
+   CUDA graphs that captured NCCL ops on this comm are destroyed". Measured
+   both ways in the last two rows: with a captured all-reduce still alive
+   `destroy_process_group()` never returned in 30s; drop the graph first and it
+   returns in **0.19s**, after which the full round trip to 0 MiB and back
+   works, compute verified.
+
+So on this stack **"park a TP>1 engine to 0 MiB" and "keep the captured CUDA
+graphs" are mutually exclusive.** At TP=1 the warmup/capture phase those graphs
+come out of is 11.3s of the 43.30s cold start (`warmup.compile_or_warm_up`, of
+which 1.75s is instrumented `cudagraph.capture_begin` time) — precisely the cost
+level 1 exists to preserve — so paying it back on every wake would cancel most of
+what the park buys.
+
+The earlier reading of this hang recorded in the transcript — a *mutual wait*
+between the two ranks, each blocked on state the other could not supply because
+only one rank was ever mid-checkpoint — **is wrong, and the matrix disproves
+it.** `--parallel`, which puts both ranks mid-checkpoint simultaneously, hangs
+identically; and the NCCL and symmetric-memory rows hang with only one child
+ever touched. The `futex_wait_queue` in `/proc/<pid>/wchan` is a symptom of the
+wedged driver call, not a rank-to-rank deadlock. Ordering is not the bug.
+
+**The one backend with a real answer is not enough by itself.** flashinfer
+implements exactly the operation this needs, under the name *Stable-VA
+checkpointing* (`flashinfer/comm/allreduce.py:204`): unmap the physical backing
+but keep the virtual address, so a CUDA graph that baked that address in still
+replays. That is why `checkpoint_prepare` supports FlashInfer and nothing else.
+`scripts/tp2-park-probe.sh --arm flashinfer` forces the engine onto it
+(`VLLM_ALLREDUCE_USE_FLASHINFER=1`, `VLLM_ALLREDUCE_USE_SYMM_MEM=0`,
+`--disable-custom-all-reduce`) and the detach demonstrably starts working: the
+chain drops to `Using ['FLASHINFER', 'PYNCCL'] all-reduce backends` and
+`/checkpoint_prepare` now frees **512 MiB** (4033 → 3521 MiB per GPU) where the
+stock arm freed nothing. It still hangs — `PYNCCL` is still in the chain, is
+still built unconditionally, is still captured in the graphs, and has no
+stable-VA path. Transcript:
+`reports/tp2-park-flashinfer-20260903-130336.txt`.
+
+Which makes the upstream ask precise, and small:
+
+* extend the stable-VA detach to `PyNcclCommunicator` — `custom_all_reduce.py:505`
+  already has a `close()`, `symm_mem.py` has no teardown at all, and `pynccl.py`
+  has a `destroy()` that cannot be called while graphs live;
+* or have `checkpoint_prepare` fail loudly instead of returning 0.06s of success
+  when the active backends are ones it cannot release. As shipped it reports
+  success and the caller then hangs in the driver with the per-process
+  checkpoint lock held, which is the worst available failure mode.
+
+Recovery, for anyone who hits this: the wedge is process-level, not
+unrecoverable driver state — `SIGKILL` the tree and both GPUs read 0 MiB again.
+Kill by pid (`nvidia-smi --query-compute-apps=pid`), not by `pkill -f 'vllm
+serve'`: the workers rename themselves to `VLLM::Worker_TP0` via setproctitle, so
+that pattern misses them and leaves several GiB stranded.
 
 ## Restoring onto a different GPU
 
@@ -412,12 +493,12 @@ single multi-GPU serving pod that already owns all its devices, that is not a
 regression — it is describing what is already true. As a general mechanism it is
 a real trade, and it should be written down as one rather than sold as free.
 
-Still untested for a real remap: **TP>1**, which must additionally drive
-`Worker.checkpoint_prepare` / `checkpoint_restore` (`gpu_worker.py:261`) to tear
-down and rebuild NCCL across the remap. At TP=1 there is no communicator, so the
-run above says nothing about it — and it turns out to be moot until the base
-case is fixed: even a same-GPU, identity-map TP=2 checkpoint deadlocks before a
-remap would ever come into play, see
+Still untested for a real remap: **TP>1**, which must additionally detach and
+re-attach every device communicator across the remap via
+`Worker.checkpoint_prepare` / `checkpoint_restore` (`gpu_worker.py:261`). At TP=1
+there is no communicator, so the run above says nothing about it — and it is moot
+until the base case is fixed: a same-GPU, identity-map TP=2 checkpoint never
+completes at all, so a remap never comes into play. See
 [the TP>1 finding above](#composing-with-cuda-checkpoint-to-reach-0-mib).
 
 ## The thin variant: park at level 2, refill weights on wake
@@ -669,8 +750,9 @@ That last point retires an item flagged unverified in `foundry.md`: whether NCCL
 state survives a CUDA checkpoint at TP>1. Upstream's answer is that it does not
 survive implicitly — a checkpointing backend must explicitly prepare and restore
 each communicator, and the hooks to do it exist. Calling them is necessary but,
-measured, not sufficient: doing so and then checkpointing each `WorkerProc` in
-turn deadlocks the pair rather than reaching 0 MiB — see
+measured, nowhere near sufficient: the CUDA-side implementation behind those
+hooks covers FlashInfer only, so with stock backends it releases nothing and the
+checkpoint that follows never returns — see
 [the TP>1 finding above](#composing-with-cuda-checkpoint-to-reach-0-mib).
 
 ## Reproducing
@@ -704,6 +786,19 @@ Scripts:
 * [`scripts/cuda-checkpoint-dumpability.sh`](../scripts/cuda-checkpoint-dumpability.sh)
   — what state a checkpointed process is actually left in (fds, mappings, RSS),
   and whether this container could host a dumper at all.
+* [`scripts/cuda-checkpoint-ipc-matrix.py`](../scripts/cuda-checkpoint-ipc-matrix.py)
+  — the vLLM-free bisection of the TP>1 hang: two children, one GPU each, one
+  kind of cross-rank state at a time (`plain`, `nccl`, `nccl_teardown`,
+  `nccl_graph`, `nccl_graph_free`, `ipc`, `ipc_teardown`, `symm`), then the same
+  lock → checkpoint → restore → unlock. `--parallel` puts both ranks
+  mid-checkpoint at once. Every call is wall-clock bounded, so a hang is
+  recorded as a row rather than wedging the pod. This is what produced the
+  matrix above. Needs 2 GPUs.
+* [`scripts/tp2-park-probe.sh`](../scripts/tp2-park-probe.sh) — the same
+  question on a real TP=2 engine, `--arm default` vs `--arm flashinfer`, with
+  every `cuda-checkpoint` call bounded (the first attempt at this cost 29
+  minutes of hang). Kills by pid on the way out, since the workers'
+  setproctitle names defeat `pkill -f 'vllm serve'`.
 * [`scripts/demo-cold-start.sh`](../scripts/demo-cold-start.sh) — the full live
   demo: boot, park, second tenant, migrate-or-restore-and-wake, at `--tp 1` and
   `--tp 2`. Everything is injected into the vanilla `vllm/vllm-openai` image via
