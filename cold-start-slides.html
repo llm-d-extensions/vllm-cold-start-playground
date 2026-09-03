@@ -313,6 +313,11 @@ table.data tr:last-child td{border-bottom:none;}
       <tr><td>4</td><td><span class="cite">--load-format fastsafetensors</span></td><td class="strong"><a class="cite" href="reports/reg1-s4-fst.txt">52.2s</a></td><td>6.51s</td><td>&minus;8.32s</td><td>&minus;15.73s</td></tr>
       <tr><td>5</td><td><span class="cite">cs_fst</span>: <span class="cite">nogds=True</span>, <span class="cite">max_threads=8</span>, <span class="cite">bbuf_size_kb=32768</span></td><td class="strong"><a class="cite" href="reports/reg1-s5-fsttuned.txt">50.0s</a></td><td>6.88s</td><td>&minus;2.20s</td><td>&minus;4.34s</td></tr>
     </table>
+    <small class="note">The ladder stops at the adopted config, which is what it was built to validate. The loader
+    slides that follow supersede rows 4&ndash;5 on a <em>warm</em> registry &mdash; weight load 13.69s &rarr; 7.70s,
+    &minus;5.97s to ready &mdash; but <span class="cite">instanttensor</span> has not been re-run through this
+    registry-cold ladder, so there is no first-boot number for it yet. The registry phase should stay flat at ~6.5s: no
+    load format changes how that child imports.</small>
 
     <div class="gap-box" style="border-style:solid;"><b>The finding is not the extra 7&ndash;15s &mdash; it is that the registry phase is not a constant tax.</b>
     Step 2 more than halves it, <b>14.6s &rarr; 6.66s</b>, because the registry child is <em>itself</em> a full
@@ -479,8 +484,12 @@ table.data tr:last-child td{border-bottom:none;}
 
     <div class="section-title" style="margin-top:26px;">What actually got achieved loading 61.02 GiB (TP=1)</div>
     <div class="bar-list" id="loaderbars"></div>
-    <small class="note">Bottleneck was read concurrency, not storage: GPFS delivers 9.30 GiB/s and the H100 takes
-    51.55 GiB/s, but the default loader only reached ~2.0 GiB/s.</small>
+    <small class="note">Percentages are against this mount's <b>async</b> O_DIRECT ceiling &mdash; 11.36 GiB/s at
+    io_depth&nbsp;512 (<span class="cite">reports/loader-comparison-32b.txt:322</span>) &mdash; not the 9.30 GiB/s the
+    thread-count ladder on the left tops out at. The bottleneck was never the storage and never the PCIe link: it was
+    read concurrency, plus a host staging buffer nobody pinned. The last row deletes both, and closes the ladder &mdash;
+    a <em>buffered</em> read on this page-cache-warm mount does 28.52 GiB/s, so anything past ~11 GiB/s is a different
+    fix (stop using O_DIRECT) rather than a better loader.</small>
 
     <div class="tp-row" style="margin-top:22px;">
       <div class="tp-badge tp2 gap"><span class="dot"></span><span class="lbl">TP=2 artifact sizes</span><span class="val">not traced</span><span class="unit">— demo script has no probe attached<span class="gap-note">&#9888; gap #7</span></span></div>
@@ -489,6 +498,154 @@ table.data tr:last-child td{border-bottom:none;}
     dimension for sizing: "compile caches add a few hundred MiB per <b>(model, TP, GPU, vLLM version)</b> tuple" &mdash;
     but nobody has measured what that MiB figure actually is for Qwen3-32B at TP=2, or whether both ranks duplicate
     the HF hub cache reads.</div>
+  </div>
+</section>
+
+<!-- Slide 4b: the loader question -->
+<section class="slide">
+  <h2>Part 1 &middot; The loader question</h2>
+  <h1>Every load format vLLM ships, measured: &minus;5.97s with no patch at all</h1>
+  <div class="content">
+    <p class="lede">The adopted 13.7s weight load was written down as a ceiling phase. It is not one. vLLM 0.28.0
+    accepts <b>14</b> <span class="cite">--load-format</span> values over 6 loader classes. Five find no matching files
+    in this checkpoint (<span class="cite">mistral</span>, <span class="cite">npcache</span>,
+    <span class="cite">pt</span>, and the two pre-sharded formats want an artifact that does not exist yet), one is a
+    control (<span class="cite">dummy</span>), and three were simply not installed &mdash; which the first pass recorded
+    as <em>unavailable</em> rather than measured. That leaves six paths that can be attempted here. Five boot. Three are
+    worth a ladder: same script, same pod, same 8192 context, median of 3 with cycle 0 discarded, and the load format is
+    the only variable.</p>
+
+    <div class="section-title">Matched ladder &mdash; same script, same pod, only the load format changes (<span class="cite">runs/lt1-*</span>, <span class="cite">runs/lt2-*</span>)</div>
+    <table class="data">
+      <tr><th>load format</th><th>TP=1 weight load</th><th>TP=1 ready</th><th>TP=2 weight load</th><th>TP=2 ready</th><th>patch needed?</th></tr>
+      <tr><td><span class="cite">fastsafetensors</span> + <span class="cite">cs_fst</span> &mdash; <em>the adopted config</em></td><td>13.69s</td><td class="strong">42.85s</td><td>7.96s</td><td class="strong">54.64s</td><td>yes, a monkey-patch</td></tr>
+      <tr><td><span class="cite">runai_streamer</span> + <span class="cite">distributed:true</span></td><td>9.61s</td><td class="strong">39.00s <span style="color:var(--good)">(&minus;3.85s)</span></td><td>8.12s</td><td class="strong">54.41s</td><td>no &mdash; one extra-config field</td></tr>
+      <tr style="background:color-mix(in srgb, var(--good) 9%, transparent);"><td><b><span class="cite">instanttensor</span></b></td><td><b>7.70s</b></td><td class="strong"><b>36.87s <span style="color:var(--good)">(&minus;5.97s)</span></b></td><td><b>7.50s</b></td><td class="strong">53.52s</td><td><b>no &mdash; nothing at all</b></td></tr>
+    </table>
+    <small class="note">TP=1 per-cycle totals: 42.57 / 42.85 / 43.15s (fst), 38.89 / 39.00 / 39.35s (runai),
+    35.94 / 36.87 / 37.92s (instanttensor) &mdash; the win is wider than the spread: the <em>fastest</em> fst cycle is
+    still 4.65s behind the <em>slowest</em> instanttensor cycle. TP=2 is the opposite. One arm alone spans
+    51.24&ndash;63.66s there, so only the weight-load column is readable and the 1.12s ready delta is noise.</small>
+
+    <div class="grid2" style="margin-top:22px;">
+      <div>
+        <div class="section-title">Why it wins: it deletes the leg Part 1 already blamed</div>
+        <p style="font-size:13.5px; color:var(--ink2); line-height:1.5; margin:0 0 10px;">Part 1 priced
+        <span class="cite">runai_streamer</span>'s 7.92s as <em>2.14s of read plus 3.57s of pageable H2D</em>, and named
+        pinned staging as the fix &mdash; upstream work in someone else's repo. instanttensor does not pin the host
+        staging buffer. It <b>removes</b> it: libaio O_DIRECT writes straight into a ring buffer that already lives in
+        HBM, so the read is the whole cost and the PCIe leg leaves the accounting entirely.</p>
+        <p style="font-size:13.5px; color:var(--ink2); line-height:1.5; margin:0;">That also settles what to
+        <em>configure</em>: nothing. <span class="cite">io_uring</span> is the library's first-choice backend and this
+        container's seccomp profile blocks it, so every run above silently fell back to libaio &mdash; and libaio at
+        io_depth&nbsp;512 already lands on the mount's ceiling, so the fallback costs nothing measurable. Concurrency,
+        chunk size and io_depth are flat within noise and only add setup time; <span class="cite">copy=False</span> saves
+        nothing. <b>The correct configuration is the empty one</b>, which is why a 61 GiB read at 11.2 GiB/s is a
+        one-line change here rather than a project.</p>
+      </div>
+      <div>
+        <div class="section-title">Measured, not inferred &mdash; its own debug counters</div>
+        <table class="data">
+          <tr><th><span class="cite">INSTANTTENSOR_DEBUG=1</span></th><th>TP=1</th><th>TP=2, per rank</th></tr>
+          <tr><td>backend selected</td><td class="strong">AIO</td><td class="strong">AIO</td></tr>
+          <tr><td>device ring / host buffer</td><td>4.00 / 4.00 GiB</td><td>4.00 / 2.00 GiB</td></tr>
+          <tr><td>chunk size, io_depth asked for</td><td>8 MiB, 512</td><td>8 MiB, 256</td></tr>
+          <tr><td>io_depth actually sustained</td><td class="strong">444.9</td><td class="strong">215.7 / 224.6</td></tr>
+          <tr><td>read leg (<span class="cite">load</span>)</td><td class="strong">5.47s</td><td class="strong">5.44s</td></tr>
+          <tr><td>&rarr; bytes moved per second</td><td class="strong">11.16 GiB/s</td><td class="strong">11.22 GiB/s</td></tr>
+          <tr><td>ring-buffer alloc (<span class="cite">open</span>)</td><td>0.57s</td><td>0.30s</td></tr>
+          <tr><td>metadata all_gather (<span class="cite">sync</span>)</td><td>0.00s</td><td>0.31s</td></tr>
+          <tr><td>total inside the loader</td><td class="strong">6.20s</td><td class="strong">6.17s</td></tr>
+        </table>
+        <small class="note"><span class="cite">runs/ld1-itdbg-c0</span>, <span class="cite">runs/ld2-itdbg-c0</span>.
+        Subtract 6.20s from the 7.70s phase and 1.50s is left &mdash;
+        <span class="cite">runner_load_model</span> plus <span class="cite">initialize_model</span>, which no load format
+        touches. <b>There is nothing left in this phase for a loader to take.</b></small>
+      </div>
+    </div>
+
+    <div class="gap-box"><b>What TP=2 does not resolve:</b> the source hands a raw NCCL communicator to the C extension and stripes the
+    metadata read, so striping the data is the evident intent &mdash; but both ranks' byte counters read the full
+    61.02 GiB and the per-rank read leg is flat across TP. A striped two-rank read and a lone rank both land on the same
+    ~11.2 GiB/s mount ceiling, so the timing cannot tell them apart, and no probe here counts block-device reads per
+    rank. Either way the lever was never TP striping: <b>one rank already saturates this mount</b>, which is precisely
+    why the other two loaders catch up at TP=2 and instanttensor gains only 0.20s.</div>
+  </div>
+</section>
+
+<!-- Slide 4c: the three that don't pay -->
+<section class="slide">
+  <h2>Part 1 &middot; The loader question</h2>
+  <h1>The three ruled out on availability, now priced instead of dismissed</h1>
+  <div class="content">
+    <p class="lede">The first pass excluded these three because they were not installed, which is a fact about the image
+    rather than a measurement. All three are now installed in an isolated prefix
+    (<span class="cite">pip install --no-deps --target /cache/lp</span>, reached per-arm through
+    <span class="cite">PYTHONPATH</span> so the base interpreter and every earlier run stay valid) and booted for real.
+    One of the three is the winner on the previous slide. Of the other two, one fails outright on this hardware and one
+    is a slower route to a loader vLLM already ships.</p>
+
+    <div class="cluster-title">tensorizer &mdash; three configurations, three failures</div>
+    <div class="check-grid">
+      <div class="check-card"><div class="head"><h4>Default config: CUDA OOM at 78.42 GiB</h4><span class="chip critical">does not run</span></div>
+      <p>A 61.02 GiB model on an 80 GiB H100. vLLM builds the module on the <b>meta</b> device
+      (<span class="cite">tensorizer.py:518-527</span>) and then constructs
+      <span class="cite">TensorDeserializer</span> with <span class="cite">lazy_load</span> defaulting to
+      <span class="cite">False</span>, so all 773 tensors are materialized <em>before</em>
+      <span class="cite">load_into_module</span> runs. Peak is ~1.3&times; the checkpoint.</p></div>
+      <div class="check-card"><div class="head"><h4><span class="cite">num_readers: 1</span>: OOM at 78.78 GiB</h4><span class="chip critical">not read buffers</span></div>
+      <p>Worth running because it falsifies the obvious explanation. Shrinking the reader pool to one does not help &mdash;
+      it makes it marginally worse. The overhead is the eager state dict, not I/O staging.</p></div>
+      <div class="check-card"><div class="head"><h4>The <span class="cite">lazy_load</span> escape hatch is a <span class="cite">TypeError</span></h4><span class="chip serious">vLLM bug</span></div>
+      <p><span class="cite">{"deserialization_kwargs": {"lazy_load": true}}</span> is the documented way out. It raises
+      <span class="cite">TensorDeserializer() got multiple values for keyword argument 'lazy_load'</span> from
+      <span class="cite">tensorizer.py:608</span> (<span class="cite">is_vllm_tensorized</span>), which hardcodes
+      <span class="cite">lazy_load=True</span> in its own call and so collides with the user's. The only way to make
+      tensorizer fit in HBM is unreachable. Filed nowhere.</p></div>
+      <div class="check-card"><div class="head"><h4>And it is not free even when it works</h4><span class="chip warn">cost before boot</span></div>
+      <p>Unlike every other format here, tensorizer needs a conversion pass: 133s of wall clock and a permanent second
+      copy of the weights (773 tensors, 61.03 GiB, all bf16, verified sound) that is specific to
+      <b>(model, vLLM build, dtype, TP)</b>. That is a cache-key dimension and a doubled PVC, bought before the first
+      boot is measured.</p></div>
+    </div>
+
+    <div class="cluster-title">modelexpress, what this environment lacks, and what nobody upstream owns</div>
+    <div class="check-grid">
+      <div class="check-card"><div class="head"><h4>modelexpress bare: <b>+47.7s</b>, a slower route to <span class="cite">auto</span></h4><span class="chip critical">worse</span></div>
+      <p>Its <span class="cite">LoadStrategyChain</span> tiers <span class="cite">[rdma, model_streamer, gds, default]</span>
+      and logs its way down all four: <em>no MX server configured</em>, <em>MX_MODEL_URI not set</em>, <em>GDS not
+      available</em> &rarr; <span class="cite">Eligible loaders: ['default']</span> &rarr;
+      <span class="cite">load_via_native</span>, which sets <span class="cite">load_format="auto"</span>. A 61.8s
+      weight-load phase &mdash; 0.99 GiB/s, an <em>eleventh</em> of what the same pod does with instanttensor &mdash; and
+      ready at 90.5s against the adopted config's 42.85s in the same ladder. With <span class="cite">MX_MODEL_URI</span>
+      set it reaches its runai tier: ready 39.0s, weight 11.2s, which ties on readiness and loses 1.6s of weight load to
+      calling <span class="cite">runai_streamer</span> directly. To beat that it needs a peer service this cluster does
+      not run. <em>Single runs (<span class="cite">runs/lf2-mx-c0</span>, <span class="cite">lf2-mxms-c0</span>), not
+      medians &mdash; the gap is far too large for that to matter, and it did not earn a ladder.</em></p></div>
+      <div class="check-card"><div class="head"><h4>Independent corroboration of the <span class="cite">distributed</span> finding</h4><span class="chip good">&#10003; confirms Part 1</span></div>
+      <p>modelexpress' runai wrapper defaults <span class="cite">MX_MS_DISTRIBUTED=1</span> and so always sets
+      <span class="cite">extra_config["distributed"] = True</span> &mdash; an outside project working around the same vLLM
+      quirk this repo found independently: at TP=1 that flag is the only way to make
+      <span class="cite">runai_streamer</span> write to the GPU at all.</p></div>
+      <div class="check-card"><div class="head"><h4>GPUDirect Storage: absent</h4><span class="chip critical">no hardware path</span></div>
+      <p>No <span class="cite">/dev/nvidia-fs*</span> on this node, so GDS cannot be measured here at all &mdash; and vLLM
+      still asks for it at TP=1 and pays a failed probe (see the upstream slide). NIXL is present; GDS is not.</p></div>
+      <div class="check-card"><div class="head"><h4><span class="cite">io_uring</span>: blocked by seccomp</h4><span class="chip warn">container policy</span></div>
+      <p>instanttensor's preferred backend rejects itself as <em>not available on this system</em> inside this
+      container. It costs nothing here because libaio already saturates the mount, but on faster storage this is a
+      cluster-policy decision that would cap the loader.</p></div>
+      <div class="check-card"><div class="head"><h4><span class="cite">sharded_state</span> / <span class="cite">runai_streamer_sharded</span></h4><span class="chip warn">still untested</span></div>
+      <p>Both need a pre-sharded artifact written per TP degree &mdash; the same conversion-pass and cache-key tax as
+      tensorizer, without tensorizer's failure mode. Not measured; the honest reason is that nothing above leaves enough
+      of the phase to be worth the artifact.</p></div>
+      <div class="check-card"><div class="head"><h4>The upstream RFC is thinner than the idea</h4><span class="chip warn">no maintainer response</span></div>
+      <p><a class="cite" href="https://github.com/vllm-project/vllm/issues/36091">vllm#36091</a> is closed with zero
+      comments, no maintainer reply and no linked PR. It benchmarks only against plain safetensors (57.4s &rarr; 1.77s,
+      39 GB/s on 1&times;H20) while dismissing fastsafetensors and runai in prose, discloses no limitations, and never
+      explains TP sharding. Its 39 GB/s is a statement about its storage, not its loader. <b>The head-to-head on the
+      previous slide is the one the RFC does not contain</b> &mdash; which is also the argument for adopting it with eyes open
+      rather than on the RFC's word.</p></div>
+    </div>
   </div>
 </section>
 
@@ -654,10 +811,18 @@ table.data tr:last-child td{border-bottom:none;}
   <h1>What each option spends to get its seconds back</h1>
   <div class="content">
     <p class="lede">At 43.30s (TP=1), three phases are the story &mdash; weight load, CUDA graph capture, python imports.
-    Sorted by what each fix <em>spends</em>, not by how many seconds it saves.</p>
+    Sorted by what each fix <em>spends</em>, not by how many seconds it saves. Of those three, weight load is now the
+    <em>closed</em> one: a load format measured after this slide was drafted takes it to within 1.5s of pure overhead, for
+    free. Capture and imports are what is left.</p>
 
     <div class="section-title">Adopted &mdash; costs nothing at runtime <span class="chip good" style="margin-left:8px;">&#10003; adopted</span></div>
     <div class="bar-list" id="adoptedbars"></div>
+    <div class="gap-box" style="margin-top:12px; border-color:color-mix(in srgb, var(--good) 55%, var(--border)); background:color-mix(in srgb, var(--good) 6%, transparent);"><b>Newly
+    measured, and it also costs nothing: <span class="cite">--load-format instanttensor</span> is another
+    &minus;5.97s end to end</b> at TP=1 &mdash; it replaces <em>both</em> loader rows above and retires the
+    <span class="cite">cs_fst</span> monkey-patch along with them. Stock vLLM, one <span class="cite">pip install</span>,
+    no configuration, no conversion pass, no second copy of the weights. What it spends is not seconds or bytes but
+    project health: its upstream RFC is closed with no maintainer response. Two slides on this in Part 1.</div>
 
     <div class="grid2" style="margin-top:22px;">
       <div>
@@ -728,7 +893,7 @@ table.data tr:last-child td{border-bottom:none;}
       Python 3.14 moves the Linux default to <span class="cite">forkserver</span> outright.</p></div>
     </div>
 
-    <div class="cluster-title">Storage path &mdash; fastsafetensors / GDS</div>
+    <div class="cluster-title">Storage path &mdash; load formats, fastsafetensors, GDS</div>
     <div class="check-grid">
       <div class="check-card"><div class="head"><h4><span class="cite">nogds</span> keyed on world size, not on GDS availability</h4><span class="chip serious">bug</span></div>
       <p><a class="cite" href="https://github.com/vllm-project/vllm/blob/v0.28.0/vllm/model_executor/model_loader/weight_utils.py#L1057">weight_utils.py:1057</a>: <span class="cite">nogds = pg.size() &gt; 1</span>. At TP=1 vLLM always asks for
@@ -736,6 +901,29 @@ table.data tr:last-child td{border-bottom:none;}
       <div class="check-card"><div class="head"><h4><span class="cite">max_threads</span> / <span class="cite">bbuf_size_kb</span> unreachable</h4><span class="chip critical">not plumbed</span></div>
       <p>Not exposed by vLLM's CLI, and absent from fastsafetensors' own <span class="cite">LoaderConfig</span>. The
       monkey-patch here (<a class="cite" href="coldstart/cs_fst.py">coldstart/cs_fst.py</a>) is the only way to set them at all.</p></div>
+      <div class="check-card"><div class="head"><h4>tensorizer's only escape hatch is a <span class="cite">TypeError</span></h4><span class="chip serious">bug, unfiled</span></div>
+      <p>vLLM builds the module on <b>meta</b> and then lets <span class="cite">TensorDeserializer</span> default to
+      <span class="cite">lazy_load=False</span>, so all 773 tensors are materialized before
+      <span class="cite">load_into_module</span> &mdash; ~1.3&times; the checkpoint, which OOMs a 61 GiB model on an
+      80 GiB H100. Passing <span class="cite">deserialization_kwargs.lazy_load</span> is the documented fix and it raises
+      <em>multiple values for keyword argument 'lazy_load'</em>, because <span class="cite">is_vllm_tensorized</span>
+      (<span class="cite">tensorizer.py:608</span>) already hardcodes it. The format is unusable on this hardware and the
+      workaround is unreachable.</p></div>
+      <div class="check-card"><div class="head"><h4><span class="cite">runai_streamer</span>: <span class="cite">distributed</span> doubles as device selection</h4><span class="chip serious">bug</span></div>
+      <p>At TP=1 the only way to make <span class="cite">runai_streamer</span> write to the GPU instead of host RAM is to
+      set <span class="cite">{"distributed": true}</span> on a single-rank job &mdash; a flag whose name says nothing about
+      devices, defaulting to <span class="cite">False</span> (<span class="cite">runai_streamer_loader.py:41-45</span>).
+      Independently corroborated from outside: modelexpress' runai wrapper defaults
+      <span class="cite">MX_MS_DISTRIBUTED=1</span> and sets it unconditionally. Its sibling
+      <span class="cite">RUNAI_STREAMER_CHUNK_BYTESIZE</span> is silently S3-only and does nothing on a filesystem path.</p></div>
+      <div class="check-card" style="border-color:color-mix(in srgb, var(--good) 45%, var(--border));"><div class="head"><h4>The fastest load format has no upstream owner</h4><span class="chip warn">&#10003; measured, no maintainer</span></div>
+      <p><span class="cite">--load-format instanttensor</span> is the best result in this repo's loader work
+      (<b>&minus;5.97s</b>, no patch), but <a class="cite" href="https://github.com/vllm-project/vllm/issues/36091">vllm#36091</a>
+      is closed with zero comments and no PR, and vLLM's own plumbing hedges it: <span class="cite">weight_utils.py:1121-1124</span>
+      passes <span class="cite">process_group</span> only when <span class="cite">world_size &gt; 1</span>, so TP=1 silently
+      runs it in non-distributed mode, and <span class="cite">copy=True</span> is hardcoded. Adopting it is a supply-chain
+      judgement call, not a tuning decision &mdash; and the numbers to make that call are on the loader slides rather than
+      in the RFC.</p></div>
     </div>
 
     <div class="cluster-title">Warmup &amp; capture</div>
@@ -999,11 +1187,14 @@ table.data tr:last-child td{border-bottom:none;}
     phase to go unaccounted, the 14.95s registry subprocess, is now a row in the table rather than a silent assumption,
     with every remaining second in the 43.30s accounted for. <b>TP=2 boot now is one too</b>: the same seven arms on
     two H100s, 21 runs, 94.7s &rarr; 52.7s (&minus;44%) &mdash; and the two levers that die there are root-caused, not
-    shrugged at. What is still a single live sample at TP=2 is Part 2 &mdash; which is also where the one finding sits
+    shrugged at. <b>One phase that was written down as a ceiling turned out not to be one</b>: six of vLLM's nine load
+    formats run in this image, and a matched ladder across the three that work takes weight load from 13.69s to 7.70s
+    &mdash; <b>&minus;5.97s end to end, with no patch, no configuration and no second copy of the weights</b>, which also
+    retires the one monkey-patch in the adopted set. What is still a single live sample at TP=2 is Part 2 &mdash; which is also where the one finding sits
     that no amount of further measurement will tune away: parking to 0 MiB and keeping the captured CUDA graphs are
     mutually exclusive on this stack, with a precise upstream ask now written down instead of a "deadlock" label.</p>
 
-    <div class="section-title">Seven experiments that would close the gap &mdash; one now measured, one root-caused, one half, four still open</div>
+    <div class="section-title">Eight experiments that would close the gap &mdash; one measured, one root-caused, one half, five still open</div>
     <table class="data">
       <tr><th>#</th><th>experiment</th><th>unblocks</th></tr>
       <tr><td>1</td><td class="strong" style="color:var(--good)">&#10003; measured &mdash; TP=2 phase-level ladder, 7 arms &times; 3 repeats (<span class="cite">runs/tp2-*</span>, <span class="cite">runs/tp2m8k-*</span>)</td><td><b>done</b>: 94.7s &rarr; 52.7s, phases broken down, capture and weight load compared across TP at a matched 8192</td></tr>
@@ -1013,6 +1204,7 @@ table.data tr:last-child td{border-bottom:none;}
       <tr><td>5</td><td>TP=2 demo steps 4-8 (2nd tenant, restore, correctness)</td><td>a complete TP=2 warm-standby story</td></tr>
       <tr><td>6</td><td>TP=2 cross-GPU restore</td><td>migration parity with TP=1's 4.13s</td></tr>
       <tr><td>7</td><td>TP=2 artifact/cache trace</td><td>the sizes on the artifact-sizes slide, at TP=2</td></tr>
+      <tr><td>8</td><td>Per-rank block-device read accounting for <span class="cite">instanttensor</span> at TP=2, plus a bit-identity check of its output against the adopted loader</td><td>the two things between <b>&minus;5.97s measured</b> and &minus;5.97s <em>adopted</em>: whether its TP striping is real or whether both ranks read the whole checkpoint, and proof the fastest loader yields the same bytes as the slowest</td></tr>
     </table>
     <p style="margin-top:10px;"><a class="cite" href="docs/pending-experiments.md">docs/pending-experiments.md</a> &mdash;
     full detail and citations. Its warning not to extrapolate TP=2 phases by doubling TP=1 numbers is now measured
@@ -1147,7 +1339,7 @@ table.data tr:last-child td{border-bottom:none;}
       phases: [
         {name:'Interpreter boot + Python imports', t:10.24, s:1, opt:'Optimization applied: PYTHONPYCACHEPREFIX warm bytecode cache (adopted).', d:'Bytecode compile + 6781-file import graph. Halves with PYTHONPYCACHEPREFIX warm.'},
         {name:'Setup & handshake', t:0.77, s:2, opt:'Optimization applied: none identified.', d:'Config/tokenizer resolve, hub metadata, weight-download HTTP, IPC handshake, device init.'},
-        {name:'Weight load', t:13.3, s:3, opt:'Optimization applied: --load-format fastsafetensors + cs_fst patch (nogds, threads, buffer) — both adopted.', d:'safetensors open/read/convert. Ceiling phase — storage was never the bottleneck, read concurrency was.'},
+        {name:'Weight load', t:13.3, s:3, opt:'Optimization applied: --load-format fastsafetensors + cs_fst patch (nogds, threads, buffer) — both adopted. Superseded since: --load-format instanttensor puts this phase at 7.70s with no patch at all (see the loader slides).', d:'safetensors open/read/convert. Called a ceiling phase here — it was not one. Storage was never the bottleneck; read concurrency and an unpinned host staging buffer were.'},
         {name:'KV cache alloc', t:2.09, s:4, opt:'Optimization applied: VLLM_ENABLE_STARTUP_PLAN (adopted) — skips ~0.6s of memory profiling on a fingerprint match.', d:'KV cache sizing and allocation.'},
         {name:'Compile & graph capture', t:1.79, s:5, opt:'Optimization applied: none beyond torch.compile’s own AOT cache hit (0.04s) — this is not the 3366-prologue cost below.', d:'torch.compile (0.04s, AOT cache hit) + this run’s own cudagraph capture span (1.75s).'},
         {name:'Warmup / profile run', t:11.3, s:6, opt:'Optimization applied: none yet — this span still pays torch’s per-capture synchronize()+empty_cache(), run 3366 times. Hover “+ Hoist prologue” above to see the projected fix.', d:'Dummy runs + memory profiling. In runs/w6-* this same territory refines to an 11.4s capture-specific figure — see the bottleneck slide.'},
@@ -1160,7 +1352,7 @@ table.data tr:last-child td{border-bottom:none;}
       phases: [
         {name:'Interpreter boot + Python imports', t:10.24, s:1, opt:'Optimization applied: PYTHONPYCACHEPREFIX warm bytecode cache (adopted) — unchanged by the hoist.', d:'Bytecode compile + 6781-file import graph.'},
         {name:'Setup & handshake', t:0.77, s:2, opt:'Optimization applied: none — unchanged by the hoist.', d:'Config/tokenizer resolve, hub metadata, weight-download HTTP, IPC handshake, device init.'},
-        {name:'Weight load', t:13.3, s:3, opt:'Optimization applied: fastsafetensors + cs_fst patch (adopted) — unchanged by the hoist.', d:'safetensors open/read/convert.'},
+        {name:'Weight load', t:13.3, s:3, opt:'Optimization applied: fastsafetensors + cs_fst patch (adopted) — unchanged by the hoist, and independent of it: instanttensor takes this phase to 7.70s and the two fixes compose.', d:'safetensors open/read/convert.'},
         {name:'KV cache alloc', t:2.09, s:4, opt:'Optimization applied: VLLM_ENABLE_STARTUP_PLAN (adopted) — unchanged by the hoist.', d:'KV cache sizing and allocation.'},
         {name:'Compile & graph capture', t:1.79, s:5, opt:'Optimization applied: none — unchanged by the hoist.', d:'torch.compile AOT cache hit + this run’s own capture span.'},
         {name:'Warmup / profile run — prologue hoisted', t:7.30, s:6, opt:'Optimization projected: hoist torch’s synchronize()+empty_cache() out of the 3366-iteration capture loop into one call after capture_model. −4.0s, +0.00 GiB steady-state GPU memory, measured end-to-end. Not yet upstreamed — docs/concurrent-cudagraph-capture.md §4b.', d:'Same dummy runs + memory profiling, minus the 3366 per-capture device-syncs and frees the measured run still pays.'},
@@ -1269,12 +1461,19 @@ table.data tr:last-child td{border-bottom:none;}
   (function(){
     var wrap = document.getElementById('loaderbars');
     var rows = [
-      ['Default loader ("auto")', '~2.0 GiB/s', '~30s min', 21.5],
-      ['+ --load-format fastsafetensors', '3.77–3.79 GiB/s', '17.6s', 40.6],
-      ['+ cs_fst patch (nogds, threads, buffer)', '5.00 GiB/s', '13.3s', 53.8]
+      ['Default loader ("auto")', '~2.0 GiB/s', '~30s min', 17.6, 'var(--seq250)',
+       'Stock lazy safetensors: mmap read into a pageable host tensor, then a per-parameter pageable H2D copy. Both legs are the slow variant of themselves.'],
+      ['+ --load-format fastsafetensors', '3.77-3.79 GiB/s', '17.6s', 33.3, 'var(--seq300)',
+       'O_DIRECT read into a GPU ring buffer -- but at TP=1 vLLM asks for GDS first and eats a failed probe, and the thread/buffer knobs are not reachable from the CLI.'],
+      ['+ cs_fst patch (nogds, threads, buffer)', '5.00 GiB/s', '13.7s', 44.0, 'var(--seq350)',
+       'The adopted config. A monkey-patch in coldstart/cs_fst.py, because max_threads and bbuf_size_kb are not plumbed through vLLM. 13.69s weight-load phase in the matched ladder.'],
+      ['+ --load-format runai_streamer, distributed:true', '7.71 GiB/s', '9.61s', 67.9, 'var(--seq450)',
+       'Reads at 10.61 GiB/s to host RAM, then pays 17.08 GiB/s pageable H2D because its staging buffer is never pinned. Stock vLLM, one documented extra-config field, no patch.'],
+      ['+ --load-format instanttensor', '11.22 GiB/s', '7.70s', 98.8, 'var(--good)',
+       'No host staging buffer at all: libaio O_DIRECT straight into a 4 GiB GPU ring buffer at io_depth 512. 5.47s of its 6.20s is the read leg, which is 98.8% of this mount\'s async O_DIRECT ceiling. Stock vLLM, zero configuration.']
     ];
     rows.forEach(function(r){
-      wrap.appendChild(barRow(r[0], '<br>'+r[1], r[2], '', r[3], 'var(--seq400)', r[0], r[1]+' sustained on the 61.02 GiB Qwen3-32B checkpoint. Ceiling: GPFS 9.30 GiB/s, H100 pinned H2D 51.55 GiB/s.'));
+      wrap.appendChild(barRow(r[0], '<br>'+r[1], r[2], '', r[3], r[4], r[0], r[5]));
     });
   })();
 

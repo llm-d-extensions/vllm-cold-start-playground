@@ -48,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --cold-registry) RUN_FLAGS+=(--cold-registry); shift ;;
     --cold-hf) RUN_FLAGS+=(--cold-hf); shift ;;
     --no-probe) RUN_FLAGS+=(--no-probe); shift ;;
+    --allow-concurrent) RUN_FLAGS+=(--allow-concurrent); shift ;;
     --no-first-token) RUN_FLAGS+=(--no-first-token); shift ;;
     --env)
       [[ "$2" == *=* ]] || { echo "--env wants K=V, got: $2" >&2; exit 2; }
