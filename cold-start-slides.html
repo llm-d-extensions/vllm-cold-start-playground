@@ -78,7 +78,7 @@ p.lede{font-size:17px; color:var(--ink2); max-width:820px; line-height:1.55;}
 small.note{color:var(--muted); font-size:12.5px;}
 
 /* --- stacked phase bar (slide 2) --- */
-.stack-bar{display:flex; width:100%; height:56px; border-radius:10px; overflow:hidden; border:1px solid var(--border);}
+.stack-bar{display:flex; width:100%; height:56px; border-radius:10px; overflow:hidden; border:1px solid var(--border); transition:width .25s;}
 .stack-bar .seg{position:relative; height:100%; cursor:pointer; transition:filter .15s;}
 .stack-bar .seg:hover{filter:brightness(1.08);}
 .stack-bar .seg span{position:absolute; left:6px; bottom:4px; font-size:10.5px; color:#fff; font-weight:700; text-shadow:0 1px 2px rgba(0,0,0,.35); white-space:nowrap; overflow:hidden;}
@@ -254,11 +254,14 @@ table.data tr:last-child td{border-bottom:none;}
       <div class="tp-badge tp2"><span class="dot"></span><span class="lbl">TP=2 &middot; controlled median of 3</span><span class="val">52.7s</span><span class="unit">ready &middot; baseline 94.7s, &minus;44% &middot; phases on the next two slides</span></div>
     </div>
 
-    <div class="section-title">TP=1 phase breakdown &mdash; hover a segment &middot; <a class="cite" href="reports/32b-step5-cs-fst-patch.txt">reports/32b-step5-cs-fst-patch.txt</a></div>
+    <div class="section-title">TP=1 phase breakdown, <em>second</em> boot (model-registry cache warm &mdash; see the next slide) &mdash; hover a segment, or hover a button to preview the hoist fix &middot; <a class="cite" href="reports/32b-step5-cs-fst-patch.txt">reports/32b-step5-cs-fst-patch.txt</a></div>
+    <div class="toggle" id="phasetoggle">
+      <button class="on" data-mode="measured">Measured &middot; 43.2s</button>
+      <button data-mode="projected">+ Hoist prologue (projected) &middot; ~39.2s</button>
+    </div>
     <div class="stack-bar" id="phasebar"></div>
     <div class="legend" id="phaselegend"></div>
-    <small class="note">This run's own capture/warmup split predates the newer v2-runner probes (see the bottleneck
-    slide for the refined, separately-measured 11.4s CUDA-graph-capture figure from <span class="cite">runs/w6-*</span>).</small>
+    <small class="note" id="phasenote"></small>
 
     <div class="section-title" style="margin-top:30px;">Same measurement, TP=1 vs TP=2, single run each &middot; <a class="cite" href="reports/demo-cold-start-tp1-20260903-105740.txt">reports/demo-cold-start-tp1-&hellip;.txt</a> / <a class="cite" href="reports/demo-cold-start-tp2-20260903-110308.txt">reports/demo-cold-start-tp2-&hellip;.txt</a></div>
     <div class="bar-list" id="demobars"></div>
@@ -267,7 +270,7 @@ table.data tr:last-child td{border-bottom:none;}
     baseline at 90.65s. The demo script's value was never the number &mdash; it was measuring both TPs with one
     command.</small>
 
-    <div class="section-title" style="margin-top:30px;">A warm cache is not one thing &mdash; it's at least three caches</div>
+    <div class="section-title" style="margin-top:30px;">A warm cache is not one thing &mdash; it's at least four caches</div>
     <div class="toggle" id="cachetoggle">
       <button class="cold on" data-mode="cold">Cold cache</button>
       <button class="warm" data-mode="warm">Warm cache</button>
@@ -277,6 +280,79 @@ table.data tr:last-child td{border-bottom:none;}
     <div class="gap-box"><b>TP=2 gap:</b> none of these three cache-warm/cold deltas have been measured at TP=2. The
     bytecode cache and compile caches are shared across ranks via the same PVC path, but nobody has traced whether a
     second interpreter changes the delta. See <a class="cite" href="docs/pending-experiments.md">pending experiments #7</a>.</div>
+  </div>
+</section>
+
+<!-- Slide 3ab: the first boot / model registry -->
+<section class="slide">
+  <h2>Part 1 &middot; What the ladder was assuming</h2>
+  <h1>The first boot is not the second: 14.95s of model registry nobody was counting</h1>
+  <div class="content">
+    <div class="tp-row">
+      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">registry, cache empty</span><span class="val">14.95s</span><span class="unit">median of 5, in-pod, isolated</span></div>
+      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">registry, cache present</span><span class="val">0.0002s</span><span class="unit">isolated &middot; 10&ndash;33ms in a real boot &middot; a hash and a JSON read</span></div>
+      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">first-boot ladder</span><span class="val">50.0s</span><span class="unit">from 93.6s &middot; &minus;43.69s, &minus;47%</span></div>
+    </div>
+
+    <p class="lede">Before vLLM resolves a config it needs to know what the model class supports, and it finds out by
+    importing the model module <b>in a throwaway subprocess</b> &mdash;
+    <span class="cite">_LazyRegisteredModel.inspect_model_cls</span> runs
+    <span class="cite">python -m vllm.model_executor.models.registry</span> to bring back a handful of booleans, and that
+    child pays a full <span class="cite">import vllm</span>, so a full <span class="cite">import torch</span>. The answer
+    is memoised to <span class="cite">modelinfos/&lt;module&gt;-&lt;class&gt;.json</span>, keyed on a hash of the model
+    module's bytes &mdash; paid once per (vLLM build, model module) per cache volume, then never again. <b>Every other
+    number in this deck was measured with that file already present.</b> They are second-boot numbers, and until this was
+    instrumented they did not say so.</p>
+
+    <div class="section-title">The same five arms, <span class="cite">modelinfos</span> cleared before <em>every</em> boot &middot; median of 3, interleaved, warm-up cycle discarded, 15/15 verified registry-cold &middot; <a class="cite" href="scripts/tp1-registry-ladder.sh">scripts/tp1-registry-ladder.sh</a></div>
+    <table class="data">
+      <tr><th>#</th><th>change added</th><th>first boot</th><th>registry phase</th><th>&Delta; first boot</th><th>&Delta; second boot (published)</th></tr>
+      <tr><td>1</td><td><b>baseline</b> &mdash; <span class="cite">spawn</span>, no writable <span class="cite">__pycache__</span>, <span class="cite">--load-format auto</span></td><td class="strong"><a class="cite" href="reports/reg1-s1-baseline.txt">93.6s</a></td><td>14.6s</td><td>&mdash;</td><td>&mdash;</td></tr>
+      <tr><td>2</td><td><span class="cite">PYTHONPYCACHEPREFIX=/cache/pycache</span></td><td class="strong"><a class="cite" href="reports/reg1-s2-pycache.txt">67.4s</a></td><td class="strong" style="color:var(--good)">6.66s</td><td class="strong">&minus;26.19s</td><td>&minus;22.31s</td></tr>
+      <tr><td>3</td><td><span class="cite">VLLM_WORKER_MULTIPROC_METHOD=fork</span></td><td class="strong"><a class="cite" href="reports/reg1-s3-fork.txt">60.5s</a></td><td>6.59s</td><td>&minus;6.98s</td><td>&minus;4.97s</td></tr>
+      <tr><td>4</td><td><span class="cite">--load-format fastsafetensors</span></td><td class="strong"><a class="cite" href="reports/reg1-s4-fst.txt">52.2s</a></td><td>6.51s</td><td>&minus;8.32s</td><td>&minus;15.73s</td></tr>
+      <tr><td>5</td><td><span class="cite">cs_fst</span>: <span class="cite">nogds=True</span>, <span class="cite">max_threads=8</span>, <span class="cite">bbuf_size_kb=32768</span></td><td class="strong"><a class="cite" href="reports/reg1-s5-fsttuned.txt">50.0s</a></td><td>6.88s</td><td>&minus;2.20s</td><td>&minus;4.34s</td></tr>
+    </table>
+
+    <div class="gap-box" style="border-style:solid;"><b>The finding is not the extra 7&ndash;15s &mdash; it is that the registry phase is not a constant tax.</b>
+    Step 2 more than halves it, <b>14.6s &rarr; 6.66s</b>, because the registry child is <em>itself</em> a full
+    <span class="cite">import vllm</span> and <span class="cite">PYTHONPYCACHEPREFIX</span> discounts its bytecode
+    compilation exactly as it discounts the parent's. So step 2's real first-boot win is <b>&minus;26.19s</b>, 3.9s larger
+    than the warm ladder could show &mdash; and <b>no registry-warm run could ever have found it</b>, because warm the
+    phase is 10&ndash;33ms. Steps 3&ndash;5 leave it flat at 6.5&ndash;6.9s, which is correct: none of them changes how that child
+    imports, since it is spawned during config resolution before the engine core exists.</div>
+
+    <div class="section-title" style="margin-top:22px;">Where this ladder and the published one disagree, and why</div>
+    <div class="grid2">
+      <div class="card"><h3><span class="chip good">&#10003;</span> The levers reproduce at the phase level</h3><p>Step 4's
+      weight load lands at <b>17.1s</b> against the published 17.6s, step 5's at <b>13.7s against 13.7s</b>. What differs is
+      the <em>baseline</em> <span class="cite">auto</span> loader &mdash; 26.3s here vs 32.4s published &mdash; which is why
+      steps 4&ndash;5 show smaller end-to-end &Delta;s. GPFS pagepool state, not the registry accounting: the endpoint each
+      flag controls is the same to 0.5s and 0.0s.</p></div>
+      <div class="card"><h3>Capture and warmup are flat</h3><p><span class="cite">cudagraph
+      capture</span> 10.1&ndash;11.2s and <span class="cite">warmup / profile run</span> 3.5&ndash;4.3s across all five arms
+      &mdash; matching the 11.4s capture cost priced later, and confirming no step in this table moves them.</p></div>
+      <div class="card"><h3><span class="chip warn">&#9888;</span> The node drifted late in the ladder</h3><p>Cycle c3 was the
+      slowest cycle for <b>every</b> arm (72.9 / 67.0 / 57.3 / 52.5s), and s5's spread is the ladder's widest (46.9 / 50.0 /
+      52.5s). Interleaving the arms within each cycle is what keeps that drift off whichever arm happened to run then.</p></div>
+      <div class="card"><h3><span class="chip good">&#10003;</span> No double counting</h3><p>The registry child is traced too,
+      so <span class="cite">model registry resolve</span> sits at attribution priority 62, above <span class="cite">python
+      imports</span> (60). Evidence it works: cold-boot imports are <b>34.1s</b> vs <b>35.9s</b> warm &mdash; not 15s higher.</p></div>
+    </div>
+
+    <div class="section-title" style="margin-top:22px;">The &quot;second boot&quot; column is a subtraction, so it was checked against real warm boots &middot; 12 paired boots &middot; <a class="cite" href="reports/registry-warm-check-20260903-181456.txt">reports/registry-warm-check-&hellip;.txt</a> &middot; <a class="cite" href="scripts/tp1-registry-warm-check.sh">scripts/tp1-registry-warm-check.sh</a></div>
+    <table class="data">
+      <tr><th>arm</th><th>cold total</th><th>&minus; registry</th><th>= predicted warm</th><th>measured warm</th><th>error</th></tr>
+      <tr><td>1 baseline</td><td>97.4s</td><td>14.9s</td><td>82.5s</td><td>87.3s</td><td><b style="color:var(--warn)">&minus;4.82s</b>, inside that arm's own <b>10.0s</b> warm spread (79.7 / 87.3 / 89.7)</td></tr>
+      <tr><td>5 cs_fst tuned</td><td>50.1s</td><td>6.94s</td><td>43.2s</td><td class="strong">42.3s</td><td><b style="color:var(--good)">+0.90s</b> against a 1.93s spread &mdash; and 42.3s reproduces the published 43.30s to 1.0s</td></tr>
+    </table>
+    <small class="note">Cold and warm of each arm ran back to back so nothing else about the cache state differed. The
+    subtraction is therefore a measurement of the warm case at the tuned end, and good to a few seconds at the baseline end
+    &mdash; the same arm the published table already shows spanning 85.08&ndash;91.22s. One hypothesis was tested and
+    <b>rejected</b>: that the registry subprocess pre-warms the page cache for the parent's own imports, which would make the
+    subtraction overstate the saving. It does not &mdash; warm cycle c2 beat <em>every</em> cold cycle in both
+    <span class="cite">python imports</span> and <span class="cite">weight load</span>, so the baseline's &minus;4.82s is node
+    noise, not a mechanism.</small>
   </div>
 </section>
 
@@ -918,7 +994,9 @@ table.data tr:last-child td{border-bottom:none;}
   <h2>Closing</h2>
   <h1>What's measured, what's real, and what's next</h1>
   <div class="content">
-    <p class="lede">TP=1 on one H100 is a controlled, median-of-3, phase-broken-down story: 90.65s &rarr; 43.30s (&minus;52%),
+    <p class="lede">TP=1 on one H100 is a controlled, median-of-3, phase-broken-down story: 90.65s &rarr; 43.30s (&minus;52%)
+    on a warm model-registry cache, or <b>93.6s &rarr; 50.0s (&minus;47%)</b> on a genuine first boot &mdash; and the last
+    phase to go unaccounted, the 14.95s registry subprocess, is now a row in the table rather than a silent assumption,
     with every remaining second in the 43.30s accounted for. <b>TP=2 boot now is one too</b>: the same seven arms on
     two H100s, 21 runs, 94.7s &rarr; 52.7s (&minus;44%) &mdash; and the two levers that die there are root-caused, not
     shrugged at. What is still a single live sample at TP=2 is Part 2 &mdash; which is also where the one finding sits
@@ -1061,32 +1139,75 @@ table.data tr:last-child td{border-bottom:none;}
     return row;
   }
 
-  /* ---------- Slide 3: phase stacked bar ---------- */
-  var phases = [
-    {name:'Interpreter boot + Python imports', pct:23.70, s:1, t:'10.24s', d:'Bytecode compile + 6781-file import graph. Halves with PYTHONPYCACHEPREFIX warm.'},
-    {name:'Setup & handshake', pct:1.78, s:2, t:'0.77s', d:'Config/tokenizer resolve, hub metadata, weight-download HTTP, IPC handshake, device init.'},
-    {name:'Weight load', pct:30.78, s:3, t:'13.3s', d:'safetensors open/read/convert. Ceiling phase — storage was never the bottleneck, read concurrency was.'},
-    {name:'KV cache alloc', pct:4.84, s:4, t:'2.09s', d:'KV cache sizing and allocation. ~0.6s of this is skippable via VLLM_ENABLE_STARTUP_PLAN on a fingerprint match.'},
-    {name:'Compile & graph capture', pct:4.14, s:5, t:'1.79s', d:'torch.compile (0.04s, AOT cache hit) + this run’s own cudagraph capture span (1.75s).'},
-    {name:'Warmup / profile run', pct:26.16, s:6, t:'11.3s', d:'Dummy runs + memory profiling. In runs/w6-* this same territory refines to an 11.4s capture-specific figure — see the bottleneck slide.'},
-    {name:'API server & orchestration', pct:8.61, s:7, t:'3.72s', d:'uvicorn/app build/routes + containing spans + 11ms unaccounted.'}
-  ];
-  (function(){
+  /* ---------- Slide 3: phase stacked bar — measured vs projected-hoist ---------- */
+  var phaseData = {
+    measured: {
+      total: 43.21,
+      note: 'This run’s own capture/warmup split predates the newer v2-runner probes (see the bottleneck slide for the refined, separately-measured 11.4s CUDA-graph-capture figure from <span class="cite">runs/w6-*</span>). <span class="cite">reports/32b-step5-cs-fst-patch.txt</span> already includes every adopted lever — pycache, fork, fastsafetensors, cs_fst.',
+      phases: [
+        {name:'Interpreter boot + Python imports', t:10.24, s:1, opt:'Optimization applied: PYTHONPYCACHEPREFIX warm bytecode cache (adopted).', d:'Bytecode compile + 6781-file import graph. Halves with PYTHONPYCACHEPREFIX warm.'},
+        {name:'Setup & handshake', t:0.77, s:2, opt:'Optimization applied: none identified.', d:'Config/tokenizer resolve, hub metadata, weight-download HTTP, IPC handshake, device init.'},
+        {name:'Weight load', t:13.3, s:3, opt:'Optimization applied: --load-format fastsafetensors + cs_fst patch (nogds, threads, buffer) — both adopted.', d:'safetensors open/read/convert. Ceiling phase — storage was never the bottleneck, read concurrency was.'},
+        {name:'KV cache alloc', t:2.09, s:4, opt:'Optimization applied: VLLM_ENABLE_STARTUP_PLAN (adopted) — skips ~0.6s of memory profiling on a fingerprint match.', d:'KV cache sizing and allocation.'},
+        {name:'Compile & graph capture', t:1.79, s:5, opt:'Optimization applied: none beyond torch.compile’s own AOT cache hit (0.04s) — this is not the 3366-prologue cost below.', d:'torch.compile (0.04s, AOT cache hit) + this run’s own cudagraph capture span (1.75s).'},
+        {name:'Warmup / profile run', t:11.3, s:6, opt:'Optimization applied: none yet — this span still pays torch’s per-capture synchronize()+empty_cache(), run 3366 times. Hover “+ Hoist prologue” above to see the projected fix.', d:'Dummy runs + memory profiling. In runs/w6-* this same territory refines to an 11.4s capture-specific figure — see the bottleneck slide.'},
+        {name:'API server & orchestration', t:3.72, s:7, opt:'Optimization applied: none identified.', d:'uvicorn/app build/routes + containing spans + 11ms unaccounted.'}
+      ]
+    },
+    projected: {
+      total: 39.21,
+      note: '<b>Projection, not a new run:</b> the measured 43.2s baseline with the 3366-call synchronize()+empty_cache() prologue hoisted out of <span class="cite">Warmup / profile run</span> — one call after <span class="cite">capture_model</span> instead of inside every capture. The −4.0s / +0.00 GiB delta is measured end-to-end (<span class="cite">runs/c2-nofreeonce</span>); only its placement inside this older per-run phase split is projected. Not yet upstreamed. <a class="cite" href="docs/concurrent-cudagraph-capture.md#4b-the-prerequisite-is-the-result-40s">docs/concurrent-cudagraph-capture.md &sect;4b</a>.',
+      phases: [
+        {name:'Interpreter boot + Python imports', t:10.24, s:1, opt:'Optimization applied: PYTHONPYCACHEPREFIX warm bytecode cache (adopted) — unchanged by the hoist.', d:'Bytecode compile + 6781-file import graph.'},
+        {name:'Setup & handshake', t:0.77, s:2, opt:'Optimization applied: none — unchanged by the hoist.', d:'Config/tokenizer resolve, hub metadata, weight-download HTTP, IPC handshake, device init.'},
+        {name:'Weight load', t:13.3, s:3, opt:'Optimization applied: fastsafetensors + cs_fst patch (adopted) — unchanged by the hoist.', d:'safetensors open/read/convert.'},
+        {name:'KV cache alloc', t:2.09, s:4, opt:'Optimization applied: VLLM_ENABLE_STARTUP_PLAN (adopted) — unchanged by the hoist.', d:'KV cache sizing and allocation.'},
+        {name:'Compile & graph capture', t:1.79, s:5, opt:'Optimization applied: none — unchanged by the hoist.', d:'torch.compile AOT cache hit + this run’s own capture span.'},
+        {name:'Warmup / profile run — prologue hoisted', t:7.30, s:6, opt:'Optimization projected: hoist torch’s synchronize()+empty_cache() out of the 3366-iteration capture loop into one call after capture_model. −4.0s, +0.00 GiB steady-state GPU memory, measured end-to-end. Not yet upstreamed — docs/concurrent-cudagraph-capture.md §4b.', d:'Same dummy runs + memory profiling, minus the 3366 per-capture device-syncs and frees the measured run still pays.'},
+        {name:'API server & orchestration', t:3.72, s:7, opt:'Optimization applied: none — unchanged by the hoist.', d:'uvicorn/app build/routes + containing spans.'}
+      ]
+    }
+  };
+  var phaseMode = 'measured';
+  function renderPhaseBar(mode){
+    phaseMode = mode;
+    var data = phaseData[mode];
     var bar = document.getElementById('phasebar');
     var legend = document.getElementById('phaselegend');
-    phases.forEach(function(p){
+    bar.innerHTML = ''; legend.innerHTML = '';
+    bar.style.width = Math.max(data.total/phaseData.measured.total*100, 45)+'%';
+    data.phases.forEach(function(p){
+      var pct = p.t/data.total*100;
       var seg = document.createElement('div');
-      seg.className='seg'; seg.style.width=p.pct+'%'; seg.style.background='var(--s'+p.s+')';
-      seg.innerHTML = '<span>'+p.t+'</span>';
-      seg.setAttribute('data-tip-title', p.name+' — '+p.t+' ('+p.pct.toFixed(1)+'%)');
-      seg.setAttribute('data-tip', p.d);
+      seg.className='seg'; seg.style.width=pct+'%'; seg.style.background='var(--s'+p.s+')';
+      seg.innerHTML = '<span>'+p.t.toFixed(2)+'s</span>';
+      seg.setAttribute('data-tip-title', p.name+' — '+p.t.toFixed(2)+'s ('+pct.toFixed(1)+'%)');
+      seg.setAttribute('data-tip', '<b>'+p.opt+'</b>'+p.d);
       wireTip(seg);
       bar.appendChild(seg);
       var li = document.createElement('div'); li.className='item';
       li.innerHTML = '<span class="sw" style="background:var(--s'+p.s+')"></span>'+p.name;
       legend.appendChild(li);
     });
+    document.getElementById('phasenote').innerHTML = data.note;
+    var toggle = document.getElementById('phasetoggle');
+    Array.prototype.forEach.call(toggle.querySelectorAll('button'), function(b){
+      b.classList.toggle('on', b.getAttribute('data-mode')===mode);
+    });
+  }
+  (function(){
+    var toggle = document.getElementById('phasetoggle');
+    toggle.addEventListener('mouseover', function(e){
+      var btn = e.target.closest('button'); if(!btn) return;
+      var mode = btn.getAttribute('data-mode');
+      if (mode !== phaseMode) renderPhaseBar(mode);
+    });
+    toggle.addEventListener('focusin', function(e){
+      var btn = e.target.closest('button'); if(!btn) return;
+      renderPhaseBar(btn.getAttribute('data-mode'));
+    });
   })();
+  renderPhaseBar('measured');
 
   /* ---------- Slide 3: demo TP1 vs TP2 single-run bars ---------- */
   (function(){
@@ -1105,16 +1226,18 @@ table.data tr:last-child td{border-bottom:none;}
     cold: [
       {label:'Bytecode cache (imports)', sub:'<br>spawn, no PYTHONPYCACHEPREFIX', val:'37.6s', pct:100, tip:'Ladder step 1 baseline — 37.6s of python imports, 9.73s of it bytecode-compiling vLLM’s 6781-file import graph on every boot.'},
       {label:'Model weight load', sub:'<br>default loader, cold page cache', val:'~62s', pct:100, tip:'A genuinely cold read of this 61.02 GiB model against the default loader. The discarded warm-up cycle showed 63.4s.'},
-      {label:'Startup plan (memory profiling)', sub:'<br>Qwen2.5-1.5B illustration, not 32B', val:'2.01s', pct:100, tip:'determine_memory phase, no persisted startup_plan.json fingerprint match. One pair, not a median — treat as order-of-magnitude. docs/kubernetes.md'}
+      {label:'Startup plan (memory profiling)', sub:'<br>Qwen2.5-1.5B illustration, not 32B', val:'2.01s', pct:100, tip:'determine_memory phase, no persisted startup_plan.json fingerprint match. One pair, not a median — treat as order-of-magnitude. docs/kubernetes.md'},
+      {label:'Model registry (modelinfos)', sub:'<br>empty $VLLM_CACHE_ROOT/modelinfos', val:'14.95s', pct:100, tip:'vLLM asks what the model class supports by importing the model module in a throwaway subprocess (python -m vllm.model_executor.models.registry), which pays a full import vllm to bring back a handful of booleans. Median of 5 in-pod. reports/registry-cache-cold-vs-warm-*.txt'}
     ],
     warm: [
       {label:'Bytecode cache (imports)', sub:'<br>spawn, PYTHONPYCACHEPREFIX warm', val:'16.6s', pct:44.1, tip:'Ladder step 2 — same imports, warm .pyc cache. −22.31s off the full boot total. With fork also on (step 3’s config): 22.40s → 10.50s.'},
       {label:'Model weight load', sub:'<br>default loader, warm page cache', val:'~30s', pct:48.4, tip:'GPFS pagepool warm. The ladder’s final 13.3s figure additionally stacks fastsafetensors + the cs_fst patch on top of this warm baseline.'},
-      {label:'Startup plan (memory profiling)', sub:'<br>Qwen2.5-1.5B illustration, not 32B', val:'1.37s', pct:68.2, tip:'Fingerprint matched, profiling context skipped — but profile_run() itself still executes (a logged-but-not-actually-skipped bug). −0.64s, not −1.9s.'}
+      {label:'Startup plan (memory profiling)', sub:'<br>Qwen2.5-1.5B illustration, not 32B', val:'1.37s', pct:68.2, tip:'Fingerprint matched, profiling context skipped — but profile_run() itself still executes (a logged-but-not-actually-skipped bug). −0.64s, not −1.9s.'},
+      {label:'Model registry (modelinfos)', sub:'<br>modelinfos/&lt;module&gt;-&lt;class&gt;.json present', val:'0.0002s', pct:0.0013, tip:'A hash of the model module\u2019s bytes plus a JSON read: 0.2ms isolated, 10-33ms inside a real boot, a 40575x difference. Keyed on that hash, so it is paid once per (vLLM build, model module) per cache volume. Every ladder number in this deck except the first-boot slide was measured with this file already present.'}
     ]
   };
   var cacheNotes = {
-    cold: 'Cold = no warm bytecode cache / cold page cache / no persisted startup-plan fingerprint.',
+    cold: 'Cold = no warm bytecode cache / cold page cache / no persisted startup-plan fingerprint / empty modelinfos cache. Only the fourth is all-or-nothing: 14.95s or a few milliseconds, nothing in between.',
     warm: 'Warm = everything above, warmed. VLLM_ENABLE_STARTUP_PLAN=1 is a pinned constant across every Qwen3-32B ladder run — its ~0.6s benefit is baked into every other number in this deck, not isolated on the 32B model by itself.'
   };
   function renderCache(mode){
