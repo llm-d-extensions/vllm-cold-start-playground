@@ -25,6 +25,11 @@ Knobs (all optional):
     CS_FORKSERVER=1         start EngineCore from a pre-imported forkserver
                             instead of spawn/fork (off by default; see
                             cs_forkserver.py for CS_FORKSERVER_MODE/_PRELOAD)
+    CS_FST=1                override fastsafetensors ParallelLoader kwargs
+                            (off by default; see cs_fst.py)
+    CS_DEV_ROUTES=1         add /checkpoint_prepare, /checkpoint_restore and
+                            /reload_weights HTTP routes (off by default; see
+                            cs_dev_routes.py)
     CS_MIN_DUR_MS=1         drop spans shorter than this
     CS_IMPORT_MIN_MS=15     drop import spans shorter than this
     CS_SAMPLE_MS=100        resource sampling interval
@@ -126,6 +131,12 @@ def _install():
     # parameters for an upstream change. See coldstart/cs_fst.py.
     import cs_fst
     step("fst", cs_fst.install)
+
+    # Opt-in twice over (CS_DEV_ROUTES=1); adds /checkpoint_prepare,
+    # /checkpoint_restore and /reload_weights HTTP routes. See
+    # coldstart/cs_dev_routes.py.
+    import cs_dev_routes
+    step("dev_routes", cs_dev_routes.install)
 
     import cs_env
     step("env", cs_env.capture)

@@ -128,10 +128,39 @@ caller is expected to push weights in itself (the RLHF weight-update path).
 **The failure is silent** — same shape of silent failure as the VMM
 address-ordering invariant, and worth an upstream guard.
 
-For cold start, level 2 is the interesting one anyway *if* a weight-reload path
-existed: it would cost 13.3s of weight load on wake and hold no host RAM, while
-still skipping imports, compile, capture and warmup — ~30s better than a cold
-boot. As shipped, use level 1.
+### `reload_weights` exists — and crashes the engine rather than fixing it
+
+vLLM already ships the piece that footgun seems to be missing:
+`Worker.reload_weights()` → `GPUModelRunner.reload_weights()`
+(`gpu_worker.py:470`, `gpu_model_runner.py:5643`) re-runs the model loader
+against the original checkpoint path and calls `model.load_weights(...)`
+straight into the existing, already-mapped parameter tensors — exactly
+"reload from disk," with no route ever attached to it. Wiring one up
+(`coldstart/cs_dev_routes.py`, `POST /reload_weights` → `collective_rpc`) and
+calling it after a level-2 `/wake_up` on a warmed Qwen3-32B engine (TP=1,
+graphs captured) does not fix the garbage output — it crashes EngineCore
+outright on the next request:
+
+```
+NotImplementedError: _C_cache_ops::reshape_and_cache_flash: attempted to run
+this operator with Meta tensors, but there was no fake impl or Meta kernel
+registered. ...
+vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue.
+```
+
+`reload_weights()` only re-populates the `weights` tag; it does nothing about
+whatever the level-2 `wake_up` left inconsistent elsewhere (a buffer ends up on
+the `meta` device), and the CUDA graphs captured before the call make that
+corruption fatal on the very next forward pass rather than merely wrong. So the
+mechanism upstream ships for "reload from disk" is real and callable, but not
+sufficient on its own — level 2 needs the rest of a reset path, not just a
+weight refill. Full transcript:
+`reports/demo-cold-start-tp1-20260903-105740.txt` (step 6).
+
+For cold start, level 2 is the interesting one anyway *if* a **working**
+weight-reload path existed: it would cost 13.3s of weight load on wake and
+hold no host RAM, while still skipping imports, compile, capture and warmup —
+~30s better than a cold boot. As shipped, use level 1.
 
 ## Cost, and what it is actually good for
 
@@ -257,10 +286,28 @@ process **inside the same pod**, by restoring the snapshot onto a different card
 That is measured in [Restoring onto a different GPU](#restoring-onto-a-different-gpu)
 below.
 
-Also untested: **TP>1**. `Worker.checkpoint_prepare` / `checkpoint_restore`
-(`gpu_worker.py:261`) exist precisely to tear down and rebuild device
-communicators around a checkpoint, and must be called; at TP=1 there is no
-communicator, so this run did not exercise them.
+**TP>1 is not just untested — it deadlocks.** `Worker.checkpoint_prepare` /
+`checkpoint_restore` (`gpu_worker.py:261`) exist precisely to tear down and
+rebuild device communicators around a checkpoint, and calling them is
+necessary but not sufficient. Wiring them up as HTTP routes
+(`coldstart/cs_dev_routes.py`, `POST /checkpoint_prepare` /
+`/checkpoint_restore`) and exercising the whole sequence on a warmed
+Qwen3-32B, TP=2 engine (2×H100, both `WorkerProc` ranks) reproduces the
+composition for real up to a point, then hangs: `/sleep?level=1` and
+`/checkpoint_prepare` both complete normally (11.36s and 0.06s), but
+`cuda-checkpoint --action checkpoint` against the first rank's pid then hangs
+indefinitely — confirmed stuck for 29+ minutes, not slow. Killing the stuck
+client lets the driving script advance to the second rank, whose checkpoint
+attempt hangs the same way. `/proc/<pid>/wchan` on both `WorkerProc`s shows
+`futex_wait_queue` — a mutual wait, each rank blocked on cross-process GPU/IPC
+state the other cannot supply while only one rank at a time is mid-checkpoint.
+A direct `/wake_up`, bypassing `cuda-checkpoint` entirely, also fails: the
+connection dies after a 30s timeout. The whole process tree has to be
+`SIGKILL`ed to recover; afterwards `nvidia-smi` cleanly reads 0 MiB on both
+GPUs, so the wedge is a process-synchronization deadlock, not an unrecoverable
+driver state — but as shipped, the compose-with-TP>1 story in this document
+does not complete end to end. Full transcript:
+`reports/demo-cold-start-tp2-20260903-110308.txt`.
 
 ## Restoring onto a different GPU
 
@@ -365,10 +412,13 @@ single multi-GPU serving pod that already owns all its devices, that is not a
 regression — it is describing what is already true. As a general mechanism it is
 a real trade, and it should be written down as one rather than sold as free.
 
-Still untested: **TP>1**, which must additionally drive
+Still untested for a real remap: **TP>1**, which must additionally drive
 `Worker.checkpoint_prepare` / `checkpoint_restore` (`gpu_worker.py:261`) to tear
 down and rebuild NCCL across the remap. At TP=1 there is no communicator, so the
-run above says nothing about it.
+run above says nothing about it — and it turns out to be moot until the base
+case is fixed: even a same-GPU, identity-map TP=2 checkpoint deadlocks before a
+remap would ever come into play, see
+[the TP>1 finding above](#composing-with-cuda-checkpoint-to-reach-0-mib).
 
 ## The thin variant: park at level 2, refill weights on wake
 
@@ -390,20 +440,30 @@ The mechanism this needs already exists, in three of its four parts:
   *remap* — same `0x402000000` before and after.
 * **vLLM's weight loader already copies into existing parameter tensors** rather
   than allocating new ones, which is the right shape for refilling in place.
+* **The wake-path call itself exists**: `Worker.reload_weights()` →
+  `GPUModelRunner.reload_weights()` (`gpu_worker.py:470`,
+  `gpu_model_runner.py:5643`) is exactly "run the loader after a level-2
+  sleep" — it is just never wired to a route.
 
-What does not exist is the plumbing: a wake path that runs the loader after a
-level-2 sleep. Today a level-2 wake is a footgun — `/wake_up` returns HTTP 200 in
-0.248s and the model then emits `'!!!!!!!!!!...'`, because the VAs are re-mapped
-to *uninitialised* memory and nothing refills them. The gap is a code path, not a
-new mechanism, and "reset the worker to just before the first CUDA context" is a
-reasonable way to describe where that path has to re-enter.
+So the plumbing is not missing; it is broken. Today a level-2 wake is a footgun
+— `/wake_up` returns HTTP 200 in 0.248s and the model then emits
+`'!!!!!!!!!!...'`, because the VAs are re-mapped to *uninitialised* memory and
+nothing refills them — and calling `reload_weights()` afterwards does not fix
+that: measured on a warmed Qwen3-32B engine, it crashes EngineCore instead
+(`NotImplementedError` on a `meta`-device tensor → `EngineDeadError`, see the
+[finding above](#reload_weights-exists--and-crashes-the-engine-rather-than-fixing-it)).
+`reload_weights()` refills the `weights` tag correctly but does nothing about
+whatever else level 2's wake left inconsistent, and captured CUDA graphs turn
+that into a hard crash on the next forward pass. The gap is not a missing code
+path anymore — it is that the existing path only covers one of the things a
+"reset the worker to just before the first CUDA context" wake needs to do.
 
 The trade, in measured numbers:
 
 | | host RAM while parked | unpark | correctness |
 |---|---|---|---|
 | level 1 + checkpoint | **75.67 GiB** | **4.13s** (2.67 restore + 1.46 wake) | verified byte-identical |
-| level 2 + checkpoint + refill | **6.61 GiB** | ≈ **16s** (2.7 restore + 13.3 weight load) | not implemented |
+| level 2 + checkpoint + refill | **6.61 GiB** | ≈ **16s** (2.7 restore + 13.3 weight load) | **crashes EngineCore, measured** |
 | cold start | 0 | 43.3s | — |
 
 The 13.3s is this repo's measured `weight load` phase with
@@ -608,7 +668,10 @@ measured, working, down to 0 MiB. vLLM has already built the seam for it:
 That last point retires an item flagged unverified in `foundry.md`: whether NCCL
 state survives a CUDA checkpoint at TP>1. Upstream's answer is that it does not
 survive implicitly — a checkpointing backend must explicitly prepare and restore
-each communicator, and the hooks to do it exist.
+each communicator, and the hooks to do it exist. Calling them is necessary but,
+measured, not sufficient: doing so and then checkpointing each `WorkerProc` in
+turn deadlocks the pair rather than reaching 0 MiB — see
+[the TP>1 finding above](#composing-with-cuda-checkpoint-to-reach-0-mib).
 
 ## Reproducing
 
@@ -641,6 +704,19 @@ Scripts:
 * [`scripts/cuda-checkpoint-dumpability.sh`](../scripts/cuda-checkpoint-dumpability.sh)
   — what state a checkpointed process is actually left in (fds, mappings, RSS),
   and whether this container could host a dumper at all.
+* [`scripts/demo-cold-start.sh`](../scripts/demo-cold-start.sh) — the full live
+  demo: boot, park, second tenant, migrate-or-restore-and-wake, at `--tp 1` and
+  `--tp 2`. Everything is injected into the vanilla `vllm/vllm-openai` image via
+  `coldstart/` monkeypatches (`CS_FORKSERVER=1`, `CS_FST=1`,
+  `CS_DEV_ROUTES=1`), nothing is a custom image. It is also where the two
+  findings above (`reload_weights` crashing EngineCore, and the TP=2
+  `cuda-checkpoint` deadlock) were found —
+  `reports/demo-cold-start-tp1-20260903-105740.txt` and
+  `reports/demo-cold-start-tp2-20260903-110308.txt` are the full transcripts.
+* [`coldstart/cs_dev_routes.py`](../coldstart/cs_dev_routes.py) — the
+  `CS_DEV_ROUTES=1` monkeypatch `demo-cold-start.sh` depends on: adds
+  `POST /checkpoint_prepare`, `/checkpoint_restore` and `/reload_weights` HTTP
+  routes over `collective_rpc`, none of which vLLM exposes on its own.
 
 The two cross-GPU scripts need a pod that can **see** both cards, which is
 [`manifests/pod-exec-2gpu.yaml`](../manifests/pod-exec-2gpu.yaml):

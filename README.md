@@ -54,7 +54,11 @@ recompile artifact.
 
 The next phase down, `cudagraph capture` at 11.4s, is deliberately **not** a step:
 every configuration lever that shrinks it degrades steady-state inference. See
-[CUDA graph capture](#cuda-graph-capture-114s-that-configuration-cannot-honestly-remove).
+[CUDA graph capture](#cuda-graph-capture-114s-that-configuration-cannot-honestly-remove)
+for the measurements, and
+[the solution space](#the-solution-space-and-what-each-one-costs) for every option
+explored against all three remaining phases — adopted, rejected, and closed —
+sorted by what each one spends.
 
 Each median links to that run's full report in [`reports/`](reports/) — phase
 breakdown, per-process span tree and subsystem detail. The report also shows the
@@ -175,6 +179,99 @@ workload actually reaches are ever built
 ([docs/on-demand-cudagraph.md](docs/on-demand-cudagraph.md)), or persisting graphs
 across boots ([Foundry](docs/foundry.md)) — not by asking operators to shorten the
 list.
+
+## The solution space, and what each one costs
+
+At 43.30s, three phases are 85% of what is left: **weight load 13.3s**,
+**CUDA graph capture 11.4s**, **Python imports 10.2s**. Everything this repo has
+explored attacks one of those three, and the useful way to sort the options is not
+by how many seconds they save but by **what they spend to get them**. Startup time
+is cheap to buy with someone else's budget — steady-state throughput, host RAM, a
+resident process, an operator's attention — and most of the levers that look
+attractive are doing exactly that.
+
+| what it spends | options | verdict |
+|---|---|---|
+| **nothing** — a stock env var or flag | `PYTHONPYCACHEPREFIX`, `fork`, `--load-format fastsafetensors` | **adopted**: −43.01s of the −47.35s |
+| a monkey-patch, with a real upstream fix behind it | `cs_fst` (`nogds`, `max_threads`, `bbuf_size_kb`) | **adopted**, opt-in: −4.34s |
+| **steady-state inference** | shorter `cudagraph_capture_sizes`, `FULL_DECODE_ONLY` | **rejected** — see below |
+| engineering inside vLLM | on-demand capture, a cheaper PIECEWISE forward, the five warmup findings | **the real answer**, and not ours to ship |
+| host RAM and a resident process | sleep mode, `+ cuda-checkpoint`, `+ --device-map` | **works today** — but it is warm standby, not cold start |
+| an external dependency and a driver-welded artefact | Foundry graph persistence | worth evaluating |
+| nothing that exists | serializing the graph pool for the *next* boot | **closed at the CUDA level** |
+
+### Adopted: the 52% is all in imports and weight load
+
+| solution | Δ | what it costs |
+|---|---|---|
+| `PYTHONPYCACHEPREFIX=/cache/pycache` | **−22.31s** | Nothing at runtime. The real fix is upstream: `compileall` at image build time, so no operator needs to know the knob exists. |
+| `VLLM_WORKER_MULTIPROC_METHOD=fork` | **−4.97s** | Forking a multi-threaded, torch-loaded parent. vLLM silently reverts to `spawn` if CUDA is already initialised, and Python 3.14 moves the Linux default to `forkserver`. This is borrowed time, not a durable win. |
+| `--load-format fastsafetensors` | **−15.73s** | Nothing. Storage was never the bottleneck — read concurrency was, and the flag is obscure enough that most deployments never set it. |
+| `cs_fst`: `nogds=True`, `max_threads=8`, `bbuf_size_kb=32768` | **−4.34s** | A monkey-patch. At TP=1 vLLM always asks for GPUDirect Storage without checking whether it exists, and the two tuning knobs are not plumbed through vLLM at all. |
+| `forkserver` (probe only) | **parity** | Nothing, and it buys nothing at TP=1 — one child means nothing to amortise. At TP>1 one preload serves N workers, which is where it should pay. |
+
+### Rejected: buying startup with steady-state inference
+
+Three stock levers shrink the 11.4s capture phase. All three were measured in a
+full interleaved median-of-3 matrix, and the two that work are the two that make
+serving worse
+([detail](#cuda-graph-capture-114s-that-configuration-cannot-honestly-remove)).
+
+| lever | Δ | what it spends |
+|---|---|---|
+| 10 capture sizes instead of 51 | −9.14s | Every batch that lands in a gap pads **up** to the next captured size, for the life of the server: a batch of 129 runs as 256, roughly twice the decode work for the same output. |
+| `cudagraph_mode=FULL_DECODE_ONLY` | −7.52s | Drops the PIECEWISE pass outright, so the cost re-appears on mixed prefill+decode batches under load. |
+| kernel warmups off (flashinfer autotune, cutedsl, JIT) | −0.37s | The only one with no steady-state cost — and 0.37s against a ~0.9s spread does not earn a row. |
+
+The honest part of this result is that **this harness cannot price what those two
+arms cost.** `first_token − health_200` is 43ms in every arm, because batch size 1
+is captured in all of them, and a single batch-1 request cannot observe padding
+waste. The parity is evidence that we did not measure it, not evidence that it is
+small.
+
+### The real answer: make capture cheaper or reusable
+
+None of these is a configuration change, and none has an operator-visible
+trade-off. They are the upstream asks
+([detail](#warmup-and-cuda-graph-capture-five-findings-with-no-lever)).
+
+| change | worth | status |
+|---|---|---|
+| Capture **on demand**, so only the shapes a workload reaches are built | **11.4s** off readiness, 3.3s of it deleted rather than deferred | Needs a vLLM change, and has to fix a latent silent-corruption bug first ([design](docs/on-demand-cudagraph.md)). The first request touching an uncaptured shape pays for it — which is the trade, and it is a much better one than padding every batch forever. |
+| Make the PIECEWISE forward cheaper | it is **124ms per size against 16ms for FULL** at identical graph counts | A 7.7x gap with no obvious cause. Torch-level capture is only 1.66s of the 11.4s, so this is dispatch overhead, not graph capture. |
+| Overlap capture across sizes | up to the serial fraction of 102 forwards | Unquantified; nobody has tried. |
+| Honour `cudagraph_num_of_warmups` on the v2 runner | 2.19s | The knob is read only on the **v1** runner; v2 runs one eager forward per (mode, size) unconditionally. Either honour it or delete it. |
+| Gate the tilelang JIT hook on `sys.modules` | 1.00s | Importing tilelang and TVM to install an observability hook that has nothing to watch if tilelang was never imported. No off switch exists. |
+| Check the architecture string before importing | 417ms | `kimi_k3_triton_warmup` imports `deepseek_v4` and `compressed_tensors` to reach an `isinstance` check that returns `None` for Qwen3. |
+| Say which profile run is skipped | 0s | `VLLM_ENABLE_STARTUP_PLAN=1` logs `Memory profiling will be skipped` and then runs `profile_run()` anyway (2.31s). A documentation bug, but it costs debugging time. |
+
+### Works today, but it is warm standby
+
+This is the one branch that removes the whole 11.4s *and* the 13.3s weight load —
+by never paying either again. It is not a cold-start answer: it keeps the process
+alive and spends host RAM instead ([measured](docs/sleep-mode.md)).
+
+| solution | round trip | what it costs |
+|---|---|---|
+| `--enable-sleep-mode` (level 1) | **1.45s** to wake | Frees 69.70 GiB with the captured graphs still replayable, verified byte-identical. Keeps the process and **61.68 GiB** of pinned host RAM, and stops **4.17 GiB** short of releasing the card. The first park costs 26.03s, because that pinned buffer has to be allocated once. |
+| `+ cuda-checkpoint` on the residual | **5.09s** | Takes the card to **0 MiB** with the graphs intact. Costs a **75.67 GiB** host image — so on a 128 GiB container, exactly one parked replica — plus a binary that is not in the vLLM image. And Kubernetes still will not reclaim the device: `nvidia.com/gpu: "1"` owns it for the pod's lifetime. |
+| `+ --action restore --device-map` | **4.13s**, onto a *different* GPU | A warmed Qwen3-32B migrated between two H100s while another tenant held 76 GiB of the original card, output byte-identical, with `/wake_up`'s 61.68 GiB of **new** allocations following the remap. The price is structural: the remap target must be visible to the process, so the pod must request every GPU it might move between and do its own assignment — which discards the device-plugin isolation model. TP>1 untested. |
+| Level 2 + refill weights on wake | ≈**16s** | The variant that trades RAM for seconds the right way: **6.61 GiB** parked instead of 75.67 GiB — a dozen parked replicas instead of one — for ~12s more unpark, still 2.7x better than a 43.3s boot. Three of its four parts already exist; the missing one is a wake path that runs the weight loader after a level-2 sleep. Today a level-2 wake returns HTTP 200 in 0.248s and the model emits `'!!!!!!!!!!'`. |
+
+### Evaluated and closed
+
+| option | outcome |
+|---|---|
+| **Foundry** — persist CUDA graphs to disk across boots | The only approach that makes a *warm node* capture nothing at all, and the one thing in this list that attacks the 11.4s without a vLLM change or a live process. Its cost is an external dependency plus an archive welded to one driver version, GPU model and config ([notes](docs/foundry.md)). Numbers are upstream-reported and unverified here. |
+| **Serialize the `cuda-checkpoint` snapshot for the next boot** | **Impossible, not merely unimplemented.** Of 95 `cuGraph*` symbols libcuda exports, none produces or consumes bytes, while `cuModuleLoadData` does — CUDA has a serialized format for kernels and deliberately none for graphs. `cuda-checkpoint` has no on-disk format either: its interface is pid-keyed with no output path, and what `--action checkpoint` produces is a GPU-free *process* for a dumper to write out, never a file. Even granting a dumper, the level-1 image is 75.67 GiB and takes ~90s to read at this filesystem's 859 MB/s — longer than a cold boot takes to run ([priced](docs/sleep-mode.md#can-the-snapshot-be-serialized-and-reused-by-a-fresh-vllm)). |
+
+### If you only take one thing from this
+
+The 11.4s of CUDA graph capture is the phase where the temptation to trade is
+strongest, and every *available* lever spends steady-state inference to buy it.
+The options that do not — capturing on demand, a cheaper piecewise path, persisted
+graphs — all require code that does not exist yet. That gap is the argument for
+upstream work, and quantifying it precisely is what this harness is for.
 
 ## What is patched, and what should be upstreamed
 

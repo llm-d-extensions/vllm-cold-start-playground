@@ -1,0 +1,50 @@
+=== demo-cold-start --tp 2  2026-09-03T11:03:08Z ===
+GPU0=GPU-feea6a89-8273-4fc2-8a1d-efa4d5bf01e0
+GPU1=GPU-76d064d9-54fe-e1b7-2167-200055e3b401
+[11:03:11] idle: 0, 0 MiB 1, 0 MiB 
+
+## step 1: boot A (best config, warm PVC, forkserver, fastsafetensors)
+[11:04:47] A ready in 95.79s
+[11:04:47] A worker pid(s): 1496
+1497
+[11:04:47] A mem: 0, 79487 MiB 1, 79487 MiB 
+      1496, GPU-feea6a89-8273-4fc2-8a1d-efa4d5bf01e0, 79478 MiB
+      1497, GPU-76d064d9-54fe-e1b7-2167-200055e3b401, 79478 MiB
+
+## step 2: baseline completion on A
+[11:04:47] BASE: ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+
+## step 3: park A (sleep level=1 + cuda-checkpoint -> both GPUs 0 MiB)
+[11:04:58] /sleep?level=1 in 11.36s   mem: 0, 4243 MiB 1, 4243 MiB 
+[11:04:58] /checkpoint_prepare (tear down NCCL) in 0.06s
+/tmp/demo-cold-start.sh: line 144:  2207 Killed                  "$CC" --action checkpoint --pid "$p"
+
+[11:33:50] ANOMALY: cuda-checkpoint --action checkpoint --pid 1496 (rank 0) hung
+      indefinitely after /checkpoint_prepare completed successfully in 0.06s.
+      Confirmed hung for >29 minutes (started 11:04:58, still running/blocked at
+      11:33:50) -- not slow, genuinely stuck. Subsequent cuda-checkpoint
+      --get-state calls on the same pid also blocked, indicating the NVIDIA
+      driver checkpoint mechanism itself was wedged for this process, not just
+      the client CLI.
+      Killing the stuck client (kill -9) let the demo scripts for-loop advance
+      to pid 1497 (rank 1), whose checkpoint attempt then hung the same way.
+      /proc/<pid>/wchan showed both VLLM::Worker_TP0 and VLLM::Worker_TP1
+      blocked in futex_wait_queue (mutual wait on each other), and EngineCore
+      idling in do_poll -- consistent with each rank now waiting on
+      cross-process GPU/IPC state the other rank could not supply, because only
+      one rank was ever mid-checkpoint at a time. A direct /wake_up (bypassing
+      cuda-checkpoint entirely) also failed: connection dead after a 30s
+      timeout (http_status=000) -- the instance was fully wedged, not just the
+      checkpoint call.
+      This reproduces -- more severely than documented -- the "untested" flag
+      already in docs/sleep-mode.md for TP>1 cuda-checkpoint: even with the new
+      /checkpoint_prepare route correctly tearing down NCCL communicators
+      first, checkpointing per-rank WorkerProc pids one at a time deadlocks the
+      pair. The whole vllm serve process tree (pids 1332/1338/1441/1496/1497)
+      had to be force-killed (kill -9) to recover. After the kill, nvidia-smi
+      confirmed both GPUs cleanly dropped to 0 MiB -- the wedge was at the
+      process/synchronization level, not an unrecoverable GPU driver state, and
+      the pod remains usable for further work.
+      TP=2 leg stopped here. Steps 4-8 (second tenant B, stop B, identity
+      restore, /checkpoint_restore, final wake+correctness, teardown) were not
+      attempted, since they all depend on step 3s checkpoint succeeding.
