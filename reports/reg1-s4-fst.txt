@@ -1,0 +1,253 @@
+==============================================================================
+vLLM COLD START: process exec -> API server ready
+==============================================================================
+run dir      : /Users/villardl/Projects/github.com/llm-d/llm-d-cold-start/runs/reg1-s4-fst-c1/trace
+run id       : reg1-s4-fst-c1
+model        : Qwen/Qwen3-32B  (dtype=torch.bfloat16 tp=1 pp=1 eager=False)
+compilation  : level=None mode=3 cudagraph=FULL_AND_PIECEWISE sizes=51 cache_dir=
+vllm / torch : 0.28.0 / 2.13.0+cu130 (cuda 13.0)
+node         : 224 cores (cgroup limit 16.0), NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  580.105.08  Release Build  (dvs-builder@U22-I3-B10-02-5)  Wed Oct 29 22:29:53 UTC 2025
+gpus         : NVIDIA H100 80GB HBM3[0], NVIDIA H100 80GB HBM3[1]
+model fs     : gpfs on /cache (remote-filesystem-fs-ec)
+caches at t0 : hf_home=63.9 GiB/124 files, hf_hub=63.9 GiB/119 files, vllm_cache=492.5 MiB/727 files, inductor_cache=-/0 files, triton_cache=57.0 MiB/1393 files, flashinfer_cache=122.2 KiB/1 files
+registry cache: absent at t0 (0 modelinfos files) -- this run is registry-COLD
+processes    : 5 python processes traced (6 event files)
+probe cost   : 38ms worst / 25ms median of 4 processes to install the probe (never subtracted from any phase)
+
+TOTAL TIME TO READY : 52.2s   (t0 = first vLLM process exec, ready = health_200)
+
+readiness edges (from t0):
+  port_open              t+52.1s
+  api_startup_complete   t+52.1s
+  health_200             t+52.2s
+  models_200             t+52.2s
+  first_token            t+52.2s
+
+------------------------------------------------------------------------------
+PHASE BREAKDOWN (non-overlapping; credited to the innermost active span)
+------------------------------------------------------------------------------
+  note: 6.90s (13%) had >1 process working at once; over those intervals the
+        phase shown is the more specific one, not the only one. A process blocked
+        on another (wait_for_engine_startup and friends) counts as idle, not as ipc.
+phase                       wall   share                               
+--------------------------  -----  ------  ----------------------------
+interpreter boot            50ms     0.1%  ............................
+python imports              9.82s   18.8%  #####.......................
+config & tokenizer resolve  48ms     0.1%  ............................
+model registry resolve      6.51s   12.5%  ###.........................
+network: hub metadata       895ms    1.7%  ............................
+network: weight download    31ms     0.1%  ............................
+ipc handshake               29ms     0.1%  ............................
+device & collectives init   1ms      0.0%  ............................
+weight load                 17.1s   32.8%  #########...................
+kv cache alloc              15ms     0.0%  ............................
+cudagraph capture           10.7s   20.6%  ######......................
+warmup / profile run        3.55s    6.8%  ##..........................
+api server startup          860ms    1.6%  ............................
+engine orchestration        2.49s    4.8%  #...........................
+unaccounted                 7ms      0.0%  ............................
+TOTAL                       52.2s  100.0%                              
+
+top time sinks (span credited the most wall time in each phase):
+  weight load                weights.load_weights                     15.8s
+  model registry resolve     registry.subprocess                      6.44s
+  cudagraph capture          cudagraph.capture_forward                5.86s
+  engine orchestration       engine.async_llm_init                    2.38s
+  cudagraph capture          cudagraph.warmup_forward                 1.90s
+  cudagraph capture          cudagraph.capture_begin                  1.87s
+  warmup / profile run       warmup.dummy_run                         1.63s
+  weight load                weights.runner_load_model                965ms
+  python imports             import flashinfer.jit.env                743ms
+  cudagraph capture          cudagraph.capture_model                  714ms
+  python imports             import torch                             707ms
+  network: hub metadata      http.httpx                               632ms
+  python imports             import transformers.utils.import_utils   545ms
+  warmup / profile run       warmup.warmup_kernels                    538ms
+  python imports             import nixl_ep_cu13                      444ms
+  warmup / profile run       warmup.freeze_gc_heap                    411ms
+  api server startup         api.init_app_state                       361ms
+  weight load                weights.initialize_model                 353ms
+
+------------------------------------------------------------------------------
+PROCESSES
+------------------------------------------------------------------------------
+process                       start  exec@    imports  disk read  peak rss   cmdline                                     
+----------------------------  -----  -------  -------  ---------  ---------  --------------------------------------------
+api_server (pid 28317)        exec   t+0ms    6.88s    -          1.4 GiB    /usr/bin/python3 /usr/local/bin/vllm serve -
+m (pid 28357)                 exec   t+6.90s  5.49s    -          985.3 MiB  /usr/bin/python3 -m vllm.model_executor.mode
+VLLM::EngineCore (pid 28399)  fork   t+16.1s  -        -          -          /usr/bin/python3 /usr/local/bin/vllm serve -
+python (pid 28406)            exec   t+18.3s  1.34s    -          1.2 GiB    /usr/bin/python3 -c import humming.utils.nvr
+python (pid 28408)            exec   t+18.3s  1.31s    -          1.2 GiB    /usr/bin/python3 -c import humming.ops.utils
+
+------------------------------------------------------------------------------
+SPAN TREE  (>= 50ms, depth <= 4)
+------------------------------------------------------------------------------
+
+api_server (pid 28317)  [exec t+0ms]
+  t+2.93s    cli.main                                       49.4s
+    t+6.67s    api.run_server                                 45.6s
+      t+6.68s    api.run_server_worker                          45.6s
+        t+6.68s    api.build_engine_client.enter                  44.2s
+          t+6.68s    api.build_engine_client_from_args.enter        44.2s
+        t+50.8s    api.build_app                                  125ms
+        t+51.0s    api.init_app_state                             813ms
+          t+51.0s    hf.cached_file                                 150ms
+          t+51.2s    hf.cached_file                                 152ms
+        t+51.8s    api.serve_http                                 438ms
+          t+51.8s    apiserver.uvicorn_serve                        412ms
+
+m (pid 28357)  [exec t+6.90s]
+  t+7.93s    platform.resolve                               61ms
+
+VLLM::EngineCore (pid 28399)  [exec t+16.1s]
+    t+16.1s    engine.core_proc_init                          34.7s
+      t+16.1s    engine.core_init                               34.7s
+        t+16.1s    executor.init_uniproc                          20.3s
+          t+16.9s    cuda.device_count                              303ms
+          t+17.2s    cuda.lazy_init                                 438ms
+          t+18.5s    worker.init_device                             670ms
+          t+19.1s    weights.load_model                             17.2s
+        t+36.4s    kvcache.initialize                             14.4s
+          t+36.4s    kvcache.determine_memory                       1.97s
+          t+38.4s    warmup.compile_or_warm_up                      12.4s
+
+------------------------------------------------------------------------------
+PYTHON IMPORTS
+------------------------------------------------------------------------------
+process                 module exec  modules  top packages                                                          
+----------------------  -----------  -------  ----------------------------------------------------------------------
+api_server (pid 28317)  6.88s        5962     torch 1.99s, vllm 1.11s, transformers 1.10s, openai 572ms, sympy 232ms
+m (pid 28357)           5.49s        5342     torch 1.86s, transformers 996ms, openai 552ms, vllm 508ms, sympy 199ms
+python (pid 28406)      1.34s        1299     torch 948ms, triton 113ms, numpy 39ms, humming 39ms, cuda 35ms        
+python (pid 28408)      1.31s        1299     torch 923ms, triton 116ms, humming 40ms, numpy 39ms, cuda 35ms        
+
+------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------
+WARMUP / CUDA GRAPH CAPTURE
+------------------------------------------------------------------------------
+compile_or_warm_up_model: 12.4s total
+
+step                         n    wall 
+---------------------------  ---  -----
+cudagraph.capture_model      1    10.7s
+cudagraph.manager_capture    1    10.0s
+cudagraph.capture_forward    102  6.80s
+cudagraph.warmup_forward     102  1.90s
+cudagraph.capture_begin      102  1.87s
+warmup.warmup_kernels        1    538ms
+warmup.freeze_gc_heap        1    411ms
+warmup.jit_monitor_activate  1    385ms
+warmup.kernel_warmup         1    234ms
+warmup.inductor_lazy_init    1    149ms
+warmup.kimi_k3_triton        1    147ms
+cudagraph.prepare_inputs     153  142ms
+cudagraph.capture_end        8    47ms 
+warmup.flashinfer_autotune   1    45ms 
+warmup.dummy_run             1    27ms 
+warmup.fa4_cutedsl           1    9ms  
+warmup.deep_gemm             1    3ms  
+warmup.ll_bf16_router_gemm   1    2ms  
+
+capture mode  prep n / wall  eager warmup n / wall  captured n / wall
+------------  -------------  ---------------------  -----------------
+FULL          102 / 89ms     51 / 840ms             51 / 729ms       
+PIECEWISE     51 / 53ms      51 / 1.06s             51 / 6.07s       
+    one eager warmup forward per captured graph is unconditional on the v2 model runner (gpu/cudagraph_utils.py) -- cudagraph_num_of_warmups is read only by the v1 runner, so it cannot turn this off.
+SUBSYSTEMS
+------------------------------------------------------------------------------
+network (dns/tcp/tls/http) n=57    sum=2.99s    wall=926ms    max=152ms
+    hf.cached_file                             152ms    pid=28317
+    hf.hub_download                            152ms    pid=28317
+    hf.file_metadata                           151ms    pid=28317
+weight loading             n=7     sum=67.2s    wall=17.2s    max=17.2s
+    weights.load_model                         17.2s    pid=28399
+    weights.runner_load_model                  17.2s    pid=28399
+    weights.loader_load_model                  16.3s    pid=28399
+gpu / cuda                 n=129   sum=2.83s    wall=2.75s    max=438ms
+    cuda.lazy_init                             438ms    pid=28399
+    cuda.device_count                          303ms    pid=28399
+    cuda.synchronize                           41ms     pid=28399
+collectives (nccl etc)     n=9     sum=49ms     wall=16ms     max=16ms
+    device.init_distributed                    16ms     pid=28399
+    collective.init_model_parallel             8ms      pid=28399
+    collective.init_env                        7ms      pid=28399
+compilation                n=3     sum=64ms     wall=64ms     max=32ms
+    dynamo.optimize                            32ms     pid=28317
+    dynamo.optimize                            32ms     pid=28357
+    dynamo.optimize                            1ms      pid=28399
+cuda graph capture         n=469   sum=31.5s    wall=10.7s    max=10.7s
+    cudagraph.capture_model                    10.7s    pid=28399
+    cudagraph.manager_capture                  10.0s    pid=28399
+    cudagraph.capture_forward                  172ms    pid=28399
+kv cache                   n=4     sum=16.4s    wall=14.4s    max=14.4s
+    kvcache.initialize                         14.4s    pid=28399
+    kvcache.determine_memory                   1.97s    pid=28399
+    kvcache.initialize_from_config             9ms      pid=28399
+warmup                     n=15    sum=18.0s    wall=14.4s    max=12.4s
+    warmup.compile_or_warm_up                  12.4s    pid=28399
+    warmup.profile_run                         1.97s    pid=28399
+    warmup.dummy_run                           1.60s    pid=28399
+inter-process handshakes   n=4     sum=104s     wall=34.8s    max=34.8s
+    (of which 34.8s is blocking on another process, not handshake cost)
+    engine.async_mp_client_init                34.8s    pid=28317
+    engine.mp_client_init                      34.8s    pid=28317
+    engine.wait_for_startup                    34.7s    pid=28317
+filesystem metadata calls  n=198604 sum=944ms
+    fs.os.stat                                 394ms    n=55245
+    fs.os.lstat                                333ms    n=117292
+    fs.os.scandir                              105ms    n=8230
+    fs.path.exists                             62ms     n=13938
+
+disk read during startup : - (0 MB/s avg over the window)
+netns traffic            : rx 139.2 KiB / tx 24.2 KiB
+gpu memory used          : 479.9 MiB -> 479.9 MiB
+
+------------------------------------------------------------------------------
+FINDINGS
+------------------------------------------------------------------------------
+ 1. PROCESS SERIALISATION: the last process (python (pid 28408)) only started
+    at t+18.3s, so everything it must do (imports, CUDA init, weight load)
+    begins after that. Overlapping engine/worker bring-up with API server
+    startup is pure win.
+ 2. DARK SPAN: 15.8s of weights.load_weights (pid 28399) has no probe
+    underneath it (1% of its interior is covered by child spans). The phase
+    table will show this as one opaque block. Add spans for what it calls --
+    and check cs_patch coverage for never_imported modules first, since a
+    renamed upstream module looks exactly like this.
+ 3. IMPORTS x4 PROCESSES: 15.0s of module execution summed across 4 Python
+    processes (worst single process 6.88s in api_server (pid 28317)). Only the
+    wall-clock portion on the critical path counts, but this is the cost that
+    a pre-warmed or forked engine process would avoid.
+ 4. REGISTRY SUBPROCESS: 6.44s spawning `python -m
+    vllm.model_executor.models.registry` to ask whether this architecture is a
+    text-generation model. That child pays a full `import vllm` (and so
+    `import torch`) for a handful of booleans. It is cached at
+    $VLLM_CACHE_ROOT/modelinfos/<module>-<class>.json, keyed on a hash of the
+    model module's bytes, so the *next* boot on this cache volume skips it
+    entirely -- measured at 14.95s cold vs 0.0002s warm (median of 5,
+    scripts/registry-cache-probe.py). Pre-populating that file in the image,
+    or at pod start before the measured window, removes it from first-boot
+    latency.
+ 5. DARK SPAN: 6.44s of registry.subprocess (pid 28317) has no probe
+    underneath it (0% of its interior is covered by child spans). The phase
+    table will show this as one opaque block. Add spans for what it calls --
+    and check cs_patch coverage for never_imported modules first, since a
+    renamed upstream module looks exactly like this.
+ 6. CPU THROTTLING: the container was throttled for 6.23s across 4 periods
+    during startup (cpu limit 16.0 cores). Raise the CPU limit/request:
+    imports, safetensors conversion and Inductor compilation are all
+    CPU-bound.
+ 7. DARK SPAN: 1.46s of warmup.dummy_run (pid 28399) has no probe underneath
+    it (9% of its interior is covered by child spans). The phase table will
+    show this as one opaque block. Add spans for what it calls -- and check
+    cs_patch coverage for never_imported modules first, since a renamed
+    upstream module looks exactly like this.
+ 8. NETWORK ON CRITICAL PATH: 926ms attributed to HTTP (31ms of it weight
+    download). If the model is already local, set HF_HUB_OFFLINE=1 and
+    TRANSFORMERS_OFFLINE=1 to remove the metadata round trips; also check
+    VLLM_NO_USAGE_STATS=1 to drop the telemetry POST.
+
+probe targets not applied to this vLLM version (10): huggingface_hub.file_download:_request_wrapper, mmap:mmap.__init__, starlette.routing:Router.startup, torch._inductor.codecache:AsyncCompile.wait, torch._inductor.codecache:AsyncCompile.warm_pool, torch._inductor.codecache:FxGraphCache.load, torch._inductor.output_code:FxGraphCache.load, torch._inductor.output_code:FxGraphCache.load_with_key ...
+
+probe targets whose module was never imported (21): nvidia_ml_py:nvmlInit, vllm.distributed.device_communicators.custom_all_reduce:CustomAllreduce.__init__, vllm.engine.async_llm_engine:AsyncLLMEngine.from_engine_args, vllm.engine.llm_engine:LLMEngine.__init__, vllm.entrypoints.openai.serving_models:OpenAIServingModels.init_static_loras, vllm.executor.uniproc_executor:UniProcExecutor._init_executor, vllm.model_executor.model_loader.loader:DefaultModelLoader._prepare_weights, vllm.model_executor.model_loader.loader:DefaultModelLoader.load_model ...

@@ -1,0 +1,34 @@
+paired cold/warm registry boots -- does the ladder's second-boot subtraction hold?
+model=Qwen/Qwen3-32B TP=1 max-model-len=8192  runs/regw-*  scripts/tp1-registry-warm-check.sh
+12 boots, 3 cycles, cold and warm of each arm back to back so cache state is otherwise identical
+
+=== is the ladder's 'second boot' subtraction sound? ===
+
+arm              n         cold   registry    predicted         warm       error
+--------------------------------------------------------------------------------
+s1-baseline      3        97.4s      14.9s        82.5s        87.3s      -4.82s
+s5-fsttuned      3        50.1s      6.94s        43.2s        42.3s      +0.90s
+
+predicted = cold total - cold registry phase (what the ladder reports)
+warm      = the same arm measured with the cache already populated
+error     = predicted - warm; agreement means inside the warm spread
+
+s1-baseline    AGREES  (error -4.82s vs warm spread 10.01s)
+s5-fsttuned    AGREES  (error +0.90s vs warm spread 1.93s)
+
+VERDICT: the subtraction holds; the ladder's second-boot column is
+         a measurement of the warm case, not just an inference.
+
+per-run detail:
+  regw-s1-baseline-cold-c1       total=97.2s   imports=34.1s   registry=15.0s   weight=27.4s  
+  regw-s1-baseline-cold-c2       total=98.9s   imports=33.6s   registry=14.9s   weight=27.8s  
+  regw-s1-baseline-cold-c3       total=97.4s   imports=33.5s   registry=14.4s   weight=27.3s  
+  regw-s1-baseline-warm-c1       total=87.3s   imports=35.9s   registry=33ms    weight=30.3s  
+  regw-s1-baseline-warm-c2       total=79.7s   imports=33.4s   registry=30ms    weight=26.2s  
+  regw-s1-baseline-warm-c3       total=89.7s   imports=36.3s   registry=33ms    weight=30.2s  
+  regw-s5-fsttuned-cold-c1       total=50.9s   imports=9.71s   registry=6.94s   weight=13.6s  
+  regw-s5-fsttuned-cold-c2       total=50.1s   imports=10.2s   registry=7.01s   weight=13.3s  
+  regw-s5-fsttuned-cold-c3       total=48.3s   imports=8.98s   registry=6.52s   weight=13.0s  
+  regw-s5-fsttuned-warm-c1       total=42.3s   imports=9.37s   registry=10ms    weight=13.2s  
+  regw-s5-fsttuned-warm-c2       total=41.9s   imports=9.37s   registry=9ms     weight=13.4s  
+  regw-s5-fsttuned-warm-c3       total=43.8s   imports=9.74s   registry=10ms    weight=13.7s  

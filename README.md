@@ -38,7 +38,10 @@ discarded, so torch.compile misses and cold bytecode land on every arm equally
 instead of on whichever one happened to run first. The steps come from one
 five-arm matrix (`runs/lad2-*`); a second five-arm matrix (`runs/w6-*`) priced the
 CUDA graph capture levers discussed below, and its baseline arm re-measured the
-step-5 config and reproduced it to within 0.16s.
+step-5 config and reproduced it to within 0.16s. Every arm ran with vLLM's model
+registry cache already populated, so these are *second*-boot numbers; the
+first-boot ladder is
+[below](#the-first-boot-is-not-the-second-the-model-registry-subprocess).
 
 | # | change added | median ready | the 3 runs | Δ | phase that moved |
 |---|---|---|---|---|---|
@@ -129,10 +132,109 @@ Caveats, so the table is read for what it is:
   step-5 config, and landed at 43.46s median against the 43.30s measured in the
   earlier matrix on a different day — 0.16s apart, which is the best evidence
   here that the ladder's absolute numbers are reproducible across days.
+* **The table is registry-warm.** vLLM resolves the model class in a throwaway
+  subprocess that costs 14.95s against an empty `modelinfos` cache and 0.0002s
+  against a populated one, and every arm above had it populated. The same five arms
+  on a genuinely cold registry are
+  [below](#the-first-boot-is-not-the-second-the-model-registry-subprocess); step 2's
+  win is *larger* there, because that subprocess is itself a full `import vllm`.
 * One node, one GPU, TP=1, and readiness is `/health` 200. Reproduce the steps
   with `runs/lad2-*` and the capture measurements with `runs/w6-*`. The same seven
   arms at TP=2 are [below](#what-survives-at-tp2) — two of the four levers do not
   survive.
+
+### The first boot is not the second: the model registry subprocess
+
+Before vLLM can resolve a config it needs to know what the model class supports, and it
+finds out by importing the model module **in a throwaway subprocess** —
+`_LazyRegisteredModel.inspect_model_cls` runs
+`python -m vllm.model_executor.models.registry` to bring back a handful of booleans, and
+that child pays a full `import vllm`, so a full `import torch`. The answer is memoised to
+`$VLLM_CACHE_ROOT/modelinfos/<module>-<class>.json`, keyed on a hash of the model
+module's bytes, so it is paid once per (vLLM build, model module) per cache volume and
+never again.
+
+Measured in isolation in the pod, five repeats each:
+[**14.95s cold, 0.0002s warm**](reports/registry-cache-cold-vs-warm-20260903-170310.txt).
+
+Every arm of the ladder above ran against a cache that already held that file. They are
+second-boot numbers, and until this was instrumented they did not say so. Reports now
+state the cache state at t0 (`registry cache: absent at t0 (0 modelinfos files) -- this
+run is registry-COLD`), the phase table carries a `model registry resolve` row, and
+`--cold-registry` clears the cache before a run.
+
+Re-running the same five arms with that cache cleared before **every** boot
+(`scripts/tp1-registry-ladder.sh`, median of 3, arms interleaved within each cycle, a
+warm-up cycle discarded, all 15 measured runs verified registry-cold):
+
+| # | change added | first boot | registry phase | Δ first boot | Δ second boot (published) |
+|---|---|---|---|---|---|
+| 1 | **baseline** — `spawn`, no writable `__pycache__`, `--load-format auto` | [**93.6s**](reports/reg1-s1-baseline.txt) | 14.6s | — | — |
+| 2 | `PYTHONPYCACHEPREFIX=/cache/pycache` | [**67.4s**](reports/reg1-s2-pycache.txt) | 6.66s | **−26.19s** | −22.31s |
+| 3 | `VLLM_WORKER_MULTIPROC_METHOD=fork` | [**60.5s**](reports/reg1-s3-fork.txt) | 6.59s | −6.98s | −4.97s |
+| 4 | `--load-format fastsafetensors` | [**52.2s**](reports/reg1-s4-fst.txt) | 6.51s | −8.32s | −15.73s |
+| 5 | `cs_fst` patch: `nogds=True`, `max_threads=8`, `bbuf_size_kb=32768` | [**50.0s**](reports/reg1-s5-fsttuned.txt) | 6.88s | −2.20s | −4.34s |
+
+**93.6s → 50.0s, −43.69s (−47%)** on a first boot, against −47.35s (−52%) warm. Per-arm
+numbers, including each arm's own spread, in
+[`reports/tp1-registry-cold-ladder.csv`](reports/tp1-registry-cold-ladder.csv).
+
+The finding worth having is not the extra 7-15s. It is that **the registry phase is not a
+constant tax — step 2 more than halves it**, 14.6s → 6.66s. The registry child is itself a
+full `import vllm`, so `PYTHONPYCACHEPREFIX` discounts its bytecode compilation exactly as
+it discounts the parent's. Step 2's real first-boot win is **−26.19s**, 3.9s larger than
+the warm ladder could show, and no registry-warm run could have found it: in a warm run
+the phase is 10-33ms. Steps 3-5 leave it flat at 6.5-6.9s, which is what should happen —
+none of them changes how that child imports, since it is spawned during config resolution
+before the engine core exists.
+
+Per-phase, the five arms are:
+
+| arm | total | imports | registry | weight load | cudagraph capture | warmup |
+|---|---|---|---|---|---|---|
+| 1 baseline | 93.6s | 32.8s | 14.6s | 26.1s | 10.1s | 4.26s |
+| 2 pycacheprefix | 67.4s | 14.9s | 6.66s | 26.4s | 11.2s | 3.54s |
+| 3 fork | 60.5s | 8.99s | 6.59s | 26.3s | 10.7s | 3.61s |
+| 4 fastsafetensors | 52.2s | 9.82s | 6.51s | 17.1s | 10.7s | 3.55s |
+| 5 cs_fst tuned | 50.0s | 9.65s | 7.14s | 13.7s | 11.1s | 3.76s |
+
+Where this ladder and the published one disagree, and why:
+
+* **The levers reproduce at the phase level, which is the reliable evidence.** Step 4's
+  weight load lands at 17.1s against the published 17.6s, and step 5's at **13.7s against
+  13.7s**. What differs is the *baseline* `auto` loader — 26.3s here against 32.4s
+  published — and that is why steps 4 and 5 show smaller end-to-end Δs (−8.32s, −2.20s)
+  than the published −15.73s and −4.34s. GPFS pagepool state, the caveat above; the
+  endpoint each flag actually controls is the same to 0.5s and 0.0s.
+* **`cudagraph capture` and `warmup / profile run` are flat across all five arms**
+  (10.1-11.2s and 3.5-4.3s), matching the 11.4s capture cost priced below and confirming
+  that no step in this table moves them.
+* s5's spread is the widest in the ladder (46.9 / 50.0 / 52.5s), and cycle c3 was the
+  slowest cycle for **every** arm (72.9 / 67.0 / 57.3 / 52.5s) — the last third of this
+  ~30-minute ladder ran on a slower node than the first. Interleaving is what keeps that
+  from landing on whichever arm happened to run then.
+
+The second-boot column above is a subtraction, so it was checked against real warm boots
+rather than asserted. `scripts/tp1-registry-warm-check.sh` boots each ladder end cold and
+then warm back to back, so nothing else about the cache state differs
+([12 boots](reports/registry-warm-check-20260903-181456.txt)):
+
+| arm | cold total | − registry | = predicted warm | measured warm | error |
+|---|---|---|---|---|---|
+| 1 baseline | 97.4s | 14.9s | 82.5s | 87.3s | −4.82s, inside that arm's own **10.0s** warm spread (79.7 / 87.3 / 89.7) |
+| 5 `cs_fst` tuned | 50.1s | 6.94s | 43.2s | **42.3s** | **+0.90s** against a 1.93s spread — and 42.3s reproduces the published 43.30s to 1.0s |
+
+So the second-boot column is a measurement of the warm case at the tuned end, and good to a
+few seconds at the baseline end — the same arm the published table already shows spanning
+85.08-91.22s. In a real boot a warm registry phase reads **10-33ms**, not the isolated
+probe's 0.2ms, still three orders of magnitude under the cold cost.
+
+One hypothesis was tested and **rejected**. At n=1 the baseline's error looked like it might
+be a mechanism rather than noise: the registry subprocess does a full `import vllm` *before*
+the parent's own imports, so it could be pre-warming the page cache for them, which would
+make the subtraction overstate the saving. It does not — warm cycle c2 beat *every* cold
+cycle in both `python imports` and `weight load`, so the −4.82s is node noise in the
+noisiest arm, not a mechanism.
 
 ### What survives at TP=2
 
@@ -407,7 +509,7 @@ small.
 
 None of these is a configuration change, and none has an operator-visible
 trade-off. They are the upstream asks
-([detail](#warmup-and-cuda-graph-capture-five-findings-with-no-lever)).
+([detail](#warmup-and-cuda-graph-capture-six-findings-with-no-lever)).
 
 | change | worth | status |
 |---|---|---|
