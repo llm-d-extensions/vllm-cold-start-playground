@@ -28,7 +28,8 @@ change moves a phase it should not, that is the interesting result.
 
 | variable | how | expect it to move |
 |---|---|---|
-| **compile cache cold vs warm** | `--cold-compile` on one run, not the other | `torch.compile`, `cudagraph capture` |
+| **model registry cache cold vs warm** | `--cold-registry` on one run, not the other | `model registry resolve` — ~15s at 32B, all of it a throwaway `import vllm`. Also the first thing to check when two "identical" runs differ by ~15s |
+| **compile cache cold vs warm** | `--cold-compile` on one run, not the other | `torch.compile`, `cudagraph capture`. Note this clears **all** of `VLLM_CACHE_ROOT`, registry cache included, so pair it with `--cold-registry` on the comparison run or the registry lands in the compile delta |
 | **weights cold vs warm** | `--cold-hf`, or a fresh node | `network: weight download`, `weight load` |
 | **page cache** | fresh node vs repeat run on the same pod | `weight load` (the report flags when reads came from page cache) |
 | **hub offline** | `HF_HUB_OFFLINE=1` in the pod env | `network: hub metadata`, `config & tokenizer resolve` |

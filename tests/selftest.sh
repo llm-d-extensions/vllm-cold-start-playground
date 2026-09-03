@@ -37,6 +37,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# The exclusivity guard first: it needs only /proc and a second later it is
+# done, and a broken guard refuses real boots outright, so there is no reason to
+# find out about it after the slow part.
+echo "== exclusivity guard"
+docker run --rm ${PLATFORM:+--platform "$PLATFORM"} -v "$REPO:/work" "$IMAGE" \
+  bash /work/tests/guard_test.sh | sed 's/^/   /'
+
 mkdir -p "$OUT/trace"
 echo "== running mock vLLM in $IMAGE (cpus=$CPUS weights=${WEIGHT_MB}MB workers=$WORKERS)"
 

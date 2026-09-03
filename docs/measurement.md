@@ -102,6 +102,8 @@ Phases, roughly chronological:
 interpreter boot            python bytecode has not run yet; site + probe install
 python imports              module execution time (per-module, deduped)
 config & tokenizer resolve  engine config, HF config, tokenizer
+model registry resolve      architecture -> model class, incl. the inspection
+                            subprocess (see below)
 network: hub metadata       DNS/TCP/TLS/HTTP to the hub, telemetry
 network: weight download    the transfers themselves
 ipc handshake               ZMQ/message-queue setup, waiting for engine startup
@@ -115,6 +117,48 @@ api server startup          uvicorn, app build, route registration
 engine orchestration        the containing spans that are not any of the above
 other                       everything else
 ```
+
+`model registry resolve` deserves a note, because it is the one phase whose cost
+depends on state outside the pod. Turning an architecture string into a model
+class means answering whether it is a text-generation model, whether it is
+multimodal, whether it supports LoRA -- and vLLM answers by importing the class,
+in a throwaway subprocess so that the import does not initialise CUDA in the API
+server:
+
+```
+_SUBPROCESS_COMMAND = [sys.executable, "-m", "vllm.model_executor.models.registry"]
+```
+
+That child pays a full `import vllm`, and so a full `import torch`, to return a
+handful of booleans. The answer is cached in
+`$VLLM_CACHE_ROOT/modelinfos/<module>-<class>.json`, keyed on a hash of the model
+module's bytes, so it is paid once per (vLLM build, model module) per cache volume
+and is free on every boot afterwards. Measured in isolation, median of 5
+interleaved trials (`scripts/registry-cache-probe.py`):
+
+```
+cold modelinfos cache   14.95s   (min 14.896 / max 15.018)
+warm modelinfos cache    0.0002s (a file-bytes hash plus a ~870 B JSON read)
+```
+
+So the same pod, same model and same flags is ~15s slower on its genuinely first
+boot than on its second, and nothing in the run itself says which one you are
+looking at. That is why the report header states it outright:
+
+```
+registry cache: absent at t0 (0 modelinfos files) -- this run is registry-COLD
+```
+
+The state is captured synchronously at t0 rather than on the background thread
+that scans the other caches, because vLLM writes this file *during* startup -- a
+scan a few seconds in would report a registry-cold boot as registry-warm.
+
+Two consequences for anyone comparing runs. First, a measurement that does not
+say which side of this it is on is ambiguous by ~15s, which is larger than most
+of the levers in the README ladder. Second, `--cold-compile` clears all of
+`VLLM_CACHE_ROOT` and therefore this cache too, so a run meant to measure a cold
+`torch.compile` was also silently paying the registry; `--cold-registry` exists to
+vary the two independently, and either flag sets `cold_registry` in `meta.json`.
 
 Note that phase time is **wall-clock on the critical path**, not summed CPU
 across processes. Two workers each spending 800 ms in `torch.compile`
@@ -154,6 +198,12 @@ is cheap and worth doing once per environment.
 * **Compile caches.** A start with a populated Inductor/Triton cache is a
   different experiment from one without. `--cold-compile` clears them; the run's
   `meta.json` and the report both record which you did.
+* **The model registry cache.** The largest and least obvious of these. A pod
+  that has booted this model once already skips a ~15s inspection subprocess, so
+  "first boot" and "second boot" differ by more than most of the levers in the
+  README ladder — and until this was measured, every number in that ladder was a
+  second boot without saying so. The report header now states which it is on
+  every run; `--cold-registry` forces the cold side.
 * **CPU limit.** Imports, safetensors handling and Inductor compilation are all
   CPU-bound. cgroup throttling is sampled during startup and surfaced as a
   finding; a 2-core limit can double time-to-ready on the same GPU.

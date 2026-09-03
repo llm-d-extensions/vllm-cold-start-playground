@@ -252,10 +252,46 @@ PATCHES = [
      "weights.initialize_model", "weights", None),
     ("vllm.model_executor.model_loader.utils", "get_model_architecture",
      "weights.get_architecture", "weights", None),
-    ("vllm.model_executor.models.registry", "ModelRegistry.resolve_model_cls",
-     "weights.resolve_model_cls", "weights", None),
+
+    # ---- model registry resolution ----------------------------------
+    # Answering "is this architecture a text-generation model / multimodal /
+    # LoRA-capable" means importing the model class, and importing it in the API
+    # server would initialise CUDA there -- so vLLM imports it in a throwaway
+    # interpreter instead (`_SUBPROCESS_COMMAND = [sys.executable, "-m",
+    # "vllm.model_executor.models.registry"]`). That child pays a full `import
+    # vllm`, and so a full `import torch`, for a handful of booleans.
+    #
+    # It is cached: `inspect_model_cls` (registry.py:997) hashes the model
+    # module's bytes and looks for
+    # $VLLM_CACHE_ROOT/modelinfos/<module>-<class>.json, spawning only on a miss
+    # and writing the file afterwards. So the cost is paid once per (vLLM build,
+    # model module) per cache volume and is invisible on every run after it.
+    # These spans exist so a report says which of the two paths the run took
+    # instead of leaving a registry-cold boot looking like slow weight loading.
+    #
+    # `cat="registry"` rather than "weights": this is not weight loading, and
+    # crediting it there is what made a 16.2s subprocess read as a 31.9s weight
+    # load in runs/cc-smoke. inspect_model_cls is the parent of both paths, so
+    # it is the span to read for the total.
+    ("vllm.model_executor.models.registry",
+     "_LazyRegisteredModel.inspect_model_cls", "registry.inspect_model_cls",
+     "registry", None),
     ("vllm.model_executor.models.registry", "_run_in_subprocess",
-     "weights.registry_subprocess", "weights", None),
+     "registry.subprocess", "registry", None),
+    # The warm path is not free either: the cache key hashes the model module's
+    # bytes off the cache volume (and for a package entry point, every .py under
+    # it) before the JSON is opened.
+    ("vllm.model_executor.models.registry",
+     "_LazyRegisteredModel._get_modelinfo_module_hash", "registry.module_hash",
+     "registry", None),
+    ("vllm.model_executor.models.registry",
+     "_LazyRegisteredModel._load_modelinfo_from_cache", "registry.cache_load",
+     "registry", None),
+    ("vllm.model_executor.models.registry",
+     "_LazyRegisteredModel._save_modelinfo_to_cache", "registry.cache_save",
+     "registry", None),
+    ("vllm.model_executor.models.registry", "ModelRegistry.resolve_model_cls",
+     "registry.resolve_model_cls", "registry", None),
 
     # ---- distributed / IPC ------------------------------------------
     ("vllm.distributed.parallel_state", "init_distributed_environment",

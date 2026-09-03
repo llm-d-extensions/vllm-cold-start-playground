@@ -1,0 +1,28 @@
+registry modelinfos cache: cold vs warm  (scripts/registry-cache-probe.py)
+date: 2026-09-03T17:03:10Z   pod: vllm-coldstart   node: 2xH100
+
+registry-cache-probe: arch=Qwen3ForCausalLM repeat=5
+VLLM_CACHE_ROOT=/cache/vllm
+vllm=0.28.0 python=3.12.3
+cache file=/cache/vllm/modelinfos/vllm-model_executor-models-qwen3-Qwen3ForCausalLM.json (exists=True)
+
+  cold  r1  total= 15.018s  spawned=True   hash=-        cache_load=-
+  warm  r1  total=  0.000s  spawned=False  hash=0.0001s  cache_load=0.0001s
+  cold  r2  total= 14.951s  spawned=True   hash=-        cache_load=-
+  warm  r2  total=  0.000s  spawned=False  hash=0.0001s  cache_load=0.0001s
+  cold  r3  total= 14.976s  spawned=True   hash=-        cache_load=-
+  warm  r3  total=  0.000s  spawned=False  hash=0.0001s  cache_load=0.0001s
+  cold  r4  total= 14.942s  spawned=True   hash=-        cache_load=-
+  warm  r4  total=  0.000s  spawned=False  hash=0.0001s  cache_load=0.0001s
+  cold  r5  total= 14.896s  spawned=True   hash=-        cache_load=-
+  warm  r5  total=  0.000s  spawned=False  hash=0.0001s  cache_load=0.0001s
+
+arm      n     median       min       max   spawned
+cold     5    14.951s   14.896s   15.018s   5/5
+warm     5     0.000s    0.000s    0.000s   0/5
+
+VERDICT: registry inspection costs 14.95s on a cold modelinfos cache and 0.000s warm
+         delta = 14.95s (40575x). Cold and warm start DO differ: this belongs in the phase table.
+
+rows -> registry-cache-probe.jsonl
+

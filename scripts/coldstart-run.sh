@@ -30,6 +30,12 @@ FIRST_TOKEN=1
 USE_PROBE=1
 COLD_COMPILE=0
 COLD_HF=0
+# Clear only $VLLM_CACHE_ROOT/modelinfos -- the model-registry inspection cache.
+# Separate from --cold-compile on purpose: --cold-compile wipes all of
+# VLLM_CACHE_ROOT, which clears the compile artifacts *and* this, so a run that
+# meant to measure compilation was also silently measuring a 15s registry
+# subprocess. Varying them independently is the only way to price either.
+COLD_REGISTRY=0
 GRACE=20
 # Seconds to wait for the driver to report no process holding a GPU between
 # repeats. Polled, not slept: see the drain loop in run_once.
@@ -59,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --no-first-token) FIRST_TOKEN=0; shift ;;
     --no-probe) USE_PROBE=0; shift ;;
     --cold-compile) COLD_COMPILE=1; shift ;;
+    --cold-registry) COLD_REGISTRY=1; shift ;;
     --cold-hf) COLD_HF=1; shift ;;
     --reuse-run-id) REUSE_RUN_ID=1; shift ;;
     --) shift; break ;;
@@ -116,9 +123,34 @@ ensure_dirs
 # numbers that silently share a device.
 preflight_exclusive() {
   local self="$$" others=""
-  local p
+  local p ppid
+  # `$(pgrep ...)` forks a subshell that has not exec'd yet, so it still carries
+  # THIS script's cmdline and pgrep matches it -- a sibling pid, a few above our
+  # own, that never existed as a second harness. Skipping "$$" and "$PPID" does
+  # not catch it: the fork is neither, and under `kubectl exec` the parent lives
+  # outside the pod's PID namespace so $PPID is 0 and that arm of the test is
+  # dead code. Whether pgrep's /proc walk happens to see the fork before it execs
+  # is a race, which is why this refused three boots in a row and none before it.
+  #
+  # So do not trust the pid list: re-validate every candidate. A pid whose
+  # /proc entry has already gone was the fork, and a pid whose parent is us is
+  # our own child. Only what survives both is another harness.
+  # Fail loudly, not open. Without procps `pgrep` is absent, every scan comes
+  # back empty, and the guard silently allows exactly the shared-GPU run it
+  # exists to prevent -- an image change could switch it off and nothing would
+  # say so. This is a warning rather than an exit because refusing to boot over
+  # a missing utility would be worse than booting unguarded and saying so.
+  if ! command -v pgrep >/dev/null 2>&1; then
+    echo "coldstart-run: WARNING pgrep not found (no procps); cannot check for a" >&2
+    echo "    second harness in this container. If one is running, these numbers" >&2
+    echo "    share a GPU and are not comparable." >&2
+    return 0
+  fi
   for p in $(pgrep -f "coldstart-run[.]sh" 2>/dev/null); do
-    [[ "$p" == "$self" || "$p" == "$PPID" ]] && continue
+    [[ "$p" == "$self" ]] && continue
+    [[ -r "/proc/$p/stat" ]] || continue          # vanished: the fork, not a peer
+    ppid="$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null)"
+    [[ "$ppid" == "$self" ]] && continue          # our own child
     others="$others $p"
   done
   [[ -z "${others// /}" ]] && return 0
@@ -170,6 +202,12 @@ run_once() {
       [[ -n "$d" && "$d" != "/" ]] && rm -rf "${d:?}"/* 2>/dev/null
     done < <(cache_dirs)
   fi
+  # After --cold-compile, so `--cold-compile --cold-registry` is not order
+  # dependent, and so that clearing modelinfos alone is a no-op on the rest.
+  if [[ "$COLD_REGISTRY" == 1 ]]; then
+    mi="${VLLM_CACHE_ROOT:-$HOME/.cache/vllm}/modelinfos"
+    [[ "$mi" != "/" && "$mi" == */modelinfos ]] && rm -rf "${mi:?}" 2>/dev/null
+  fi
   if [[ "$COLD_HF" == 1 && -n "${HF_HOME:-}" ]]; then
     rm -rf "${HF_HOME:?}/hub" 2>/dev/null
   fi
@@ -184,6 +222,7 @@ run_once() {
     printf '  "probe": %s,\n' "$([[ "$USE_PROBE" == 1 ]] && echo true || echo false)"
     printf '  "cold_compile": %s,\n' "$([[ "$COLD_COMPILE" == 1 ]] && echo true || echo false)"
     printf '  "cold_hf": %s,\n' "$([[ "$COLD_HF" == 1 ]] && echo true || echo false)"
+    printf '  "cold_registry": %s,\n' "$([[ "$COLD_REGISTRY" == 1 || "$COLD_COMPILE" == 1 ]] && echo true || echo false)"
     printf '  "vllm_version": "%s",\n' "$(python3 -c 'import vllm;print(vllm.__version__)' 2>/dev/null)"
     printf '  "torch_version": "%s",\n' "$(python3 -c 'import torch;print(torch.__version__)' 2>/dev/null)"
     printf '  "gpus": "%s",\n' "$(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null | paste -sd'; ' -)"

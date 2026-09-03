@@ -52,6 +52,12 @@ PHASES = [
     ("network: weight download", 75),
     ("ipc handshake", 40),
     ("device & collectives init", 55),
+    # 62 sits deliberately above "python imports" (60): the registry's
+    # inspection subprocess is *made of* imports, and leaving them in the import
+    # bucket makes a 15s avoidable second `import vllm` indistinguishable from
+    # the API server's own unavoidable one. Below "weight load" (65) because a
+    # real weight load nested under it should still win.
+    ("model registry resolve", 62),
     ("weight load", 65),
     ("torch.compile", 80),
     ("cudagraph capture", 80),
@@ -67,6 +73,7 @@ PRIORITY = dict(PHASES)
 # canonical phase ordering for reports (roughly chronological)
 REPORT_ORDER = [
     "interpreter boot", "python imports", "config & tokenizer resolve",
+    "model registry resolve",
     "network: hub metadata", "network: weight download", "ipc handshake",
     "device & collectives init", "weight load", "kv cache alloc",
     "torch.compile", "cudagraph capture", "warmup / profile run",
@@ -81,6 +88,7 @@ CAT_PHASE = {
     "device": "device & collectives init",
     "collective": "device & collectives init",
     "gpu": "device & collectives init",
+    "registry": "model registry resolve",
     "weights": "weight load",
     "compile": "torch.compile",
     "cudagraph": "cudagraph capture",
@@ -104,6 +112,13 @@ def classify(ev):
     cat = ev.get("cat", "misc")
     if name == "interpreter.startup":
         return "interpreter boot"
+    # Registry spans carried cat="weights" until the phase existed, which
+    # credited a 16.2s throwaway `import vllm` to weight loading (runs/cc-smoke).
+    # Match on the name too so re-rendering a trace from before the fix gives the
+    # corrected attribution rather than preserving the mistake.
+    if name.startswith("registry.") or name in ("weights.registry_subprocess",
+                                                "weights.resolve_model_cls"):
+        return "model registry resolve"
     if cat == "network":
         if any(h in name for h in DOWNLOAD_HINTS):
             return "network: weight download"
@@ -185,6 +200,7 @@ class Run(object):
                 self.procs.setdefault(pid, {"pid": pid})["imports"] = m.get("args")
         self.context = self._meta("run.context")
         self.caches = self._meta("run.caches")
+        self.registry_cache = self._meta("run.registry_cache")
         self.config = self._meta("vllm.config")
         self.vllm_info = self._meta("vllm.info")
         self.torch_info = self._meta("torch.info")
@@ -396,6 +412,39 @@ def is_blocking(ev):
     if isinstance(args, dict) and "blocking" in args:
         return bool(args["blocking"])
     return ev.get("name", "") in BLOCKING_SPANS
+
+
+def registry_subprocess_s(run):
+    """Wall clock this run spent in the registry's inspection subprocess.
+
+    ``None`` means the probe never applied, which is not the same as zero and
+    must not be reported as it.
+    """
+    cov = run.coverage or {}
+    target = "vllm.model_executor.models.registry:_run_in_subprocess"
+    # "never_imported" matters as much as "not_applied": a process that never
+    # imported the registry (the selftest's mock, a worker) has no evidence
+    # either way, and reporting that as zero would claim the run skipped a cost
+    # it was never in a position to pay.
+    if target in cov.get("not_applied", []) or target in cov.get("never_imported", []):
+        return None
+    xs = [e.get("dur") or 0 for e in run.spans
+          if e.get("name") in ("registry.subprocess", "weights.registry_subprocess")]
+    return sum(xs) if xs else 0.0
+
+
+def _registry_arch_cached(run, rc):
+    """Was this run registry-warm? The subprocess firing is the ground truth.
+
+    The directory listing at t0 explains *why* but cannot decide it on its own:
+    modelinfos is keyed per model module *and* hashed on that module's bytes, so
+    a populated directory can still miss for this architecture, or be stale
+    after a vLLM upgrade.
+    """
+    sub = registry_subprocess_s(run)
+    if sub is None:
+        return bool(rc.get("exists"))      # no probe: fall back to the listing
+    return sub == 0.0
 
 
 def sweep_phases(run, t0, t1):
@@ -823,6 +872,35 @@ def findings(run, t0, t_ready, per_phase, unaccounted):
                     % (len(imp_rows), fmt_s(tot), len(imp_rows),
                        fmt_s(biggest[2]), biggest[1])))
 
+    # model registry inspection: paid, or silently skipped
+    sub = registry_subprocess_s(run)
+    reg = per_phase.get("model registry resolve", 0)
+    rc = run.registry_cache or {}
+    if sub:
+        out.append((sub, "REGISTRY SUBPROCESS: %s spawning `python -m "
+                    "vllm.model_executor.models.registry` to ask whether this "
+                    "architecture is a text-generation model. That child pays a "
+                    "full `import vllm` (and so `import torch`) for a handful of "
+                    "booleans. It is cached at "
+                    "$VLLM_CACHE_ROOT/modelinfos/<module>-<class>.json, keyed on "
+                    "a hash of the model module's bytes, so the *next* boot on "
+                    "this cache volume skips it entirely -- measured at 14.95s "
+                    "cold vs 0.0002s warm (median of 5, "
+                    "scripts/registry-cache-probe.py). Pre-populating that file "
+                    "in the image, or at pod start before the measured window, "
+                    "removes it from first-boot latency."
+                    % fmt_s(sub)))
+    elif sub == 0.0 and reg < 1.0:
+        out.append((0.0, "REGISTRY CACHE WARM: this run did NOT pay the registry "
+                    "inspection subprocess%s, so the total above is not a "
+                    "first-boot number. A pod with a fresh $VLLM_CACHE_ROOT pays "
+                    "~15s more than this (14.95s median, "
+                    "reports/registry-cache-cold-vs-warm-*.txt). Compare only "
+                    "against other registry-warm runs; --cold-registry makes it "
+                    "cold."
+                    % (" (%d modelinfos file(s) present at t0)" % rc["n"]
+                       if rc.get("n") is not None else "")))
+
     # network on the critical path
     net = per_phase.get("network: hub metadata", 0) + \
         per_phase.get("network: weight download", 0)
@@ -1027,6 +1105,18 @@ def render(run, min_ms=50.0, tree_depth=4):
     elif caches:
         L.append("caches at t0 : none of %s exist (fully cold)"
                  % ", ".join(sorted(caches)))
+    # Stated separately from "caches at t0" because it is the one cache whose
+    # state is read synchronously at t0 rather than scanned later, and because
+    # it alone decides whether this run pays ~15s for a throwaway `import vllm`
+    # (measured: reports/registry-cache-cold-vs-warm-*.txt).
+    rc = run.registry_cache or {}
+    if rc:
+        hit = _registry_arch_cached(run, rc)
+        L.append("registry cache: %s at t0 (%d modelinfos file%s) -- this run is "
+                 "registry-%s"
+                 % ("present" if rc.get("exists") else "absent",
+                    rc.get("n") or 0, "" if (rc.get("n") or 0) == 1 else "s",
+                    "warm" if hit else "COLD"))
     L.append("processes    : %d python processes traced (%d event files)"
              % (len(run.procs), len(run.files)))
     ovs = [m["args"]["overhead_s"] for m in run.metas

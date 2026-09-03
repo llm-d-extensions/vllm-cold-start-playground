@@ -208,6 +208,25 @@ def _cpu_facts():
     return out
 
 
+def _modelinfos_state():
+    """State of $VLLM_CACHE_ROOT/modelinfos *at t0*, captured synchronously.
+
+    This one cache cannot go on the background thread with the others. vLLM
+    writes the file during startup -- ``inspect_model_cls`` spawns the
+    subprocess, gets the answer, then calls ``_save_modelinfo_to_cache`` -- so a
+    scan a few seconds in reports a registry-cold boot as registry-warm, which
+    is precisely the confusion this exists to remove. It is a stat plus one
+    listdir on a directory that holds a handful of ~1 kB JSON files, so it is
+    affordable synchronously where a full ``dir_stats`` walk would not be.
+    """
+    d = os.path.join(_cache_dirs()["vllm_cache"], "modelinfos")
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return {"dir": d, "exists": False, "n": 0, "files": []}
+    return {"dir": d, "exists": True, "n": len(names), "files": names[:32]}
+
+
 def capture(full=None):
     """Emit the run context.
 
@@ -225,6 +244,8 @@ def capture(full=None):
         return
     try:
         env_snap = _env_snapshot()
+        # Synchronous, unlike the other cache scans: see _modelinfos_state.
+        T.tracer.meta("run.registry_cache", **_modelinfos_state())
         if full is None:
             full = _elect()
         threading.Thread(target=_capture_slow, args=(env_snap, full),

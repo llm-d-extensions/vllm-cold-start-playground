@@ -199,8 +199,9 @@ make run NS=my-ns MODEL=meta-llama/Llama-3.1-8B-Instruct \
 ```
 
 `scripts/run-experiment.sh` takes the same flags directly if you want more
-control (`--cold-compile`, `--cold-hf`, `--no-probe`, `--no-first-token`,
-`--no-apply`, `--delete`, and any `vllm serve` args after `--`).
+control (`--cold-compile`, `--cold-registry`, `--cold-hf`, `--no-probe`,
+`--no-first-token`, `--no-apply`, `--delete`, and any `vllm serve` args after
+`--`).
 
 ## Troubleshooting
 

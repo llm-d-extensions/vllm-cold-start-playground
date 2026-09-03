@@ -45,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --out) LOCAL_OUT="$2"; shift 2 ;;
     --cold-compile) RUN_FLAGS+=(--cold-compile); shift ;;
+    --cold-registry) RUN_FLAGS+=(--cold-registry); shift ;;
     --cold-hf) RUN_FLAGS+=(--cold-hf); shift ;;
     --no-probe) RUN_FLAGS+=(--no-probe); shift ;;
     --no-first-token) RUN_FLAGS+=(--no-first-token); shift ;;
@@ -77,6 +78,28 @@ fi
 
 echo "== 3/5 waiting for $POD to be running"
 kube wait --for=condition=Ready "pod/$POD" --timeout=20m
+
+# Wait for the kubelet to actually put the new probe in the pod's mount.
+# `kubectl apply` above only reached the API server; the ConfigMap volume
+# refreshes on the kubelet's own sync period, so an exec in the next few seconds
+# runs the PREVIOUS probe. That fails loudly if the change added a flag, and
+# silently if it only added spans -- producing a trace that is missing exactly
+# what the run was meant to measure. Polling the stamp is the only way to know.
+STAMP="$(cat "$REPO/manifests/generated/probe-stamp.txt")"
+echo "== settle waiting for probe ${STAMP:0:12} to reach the pod"
+for i in $(seq 1 90); do
+  # `|| true`: on the first poll after adding the stamp key the file does not
+  # exist yet, and under `set -e` a failed command substitution in an assignment
+  # takes the whole script down before the loop can retry.
+  POD_STAMP="$(kube exec "$POD" -c vllm -- cat /opt/coldstart-src/PROBE_STAMP 2>/dev/null | tr -d '[:space:]' || true)"
+  [[ "$POD_STAMP" == "$STAMP" ]] && { echo "   probe current after ${i}s"; break; }
+  if [[ "$i" == 90 ]]; then
+    echo "!! pod still has probe '${POD_STAMP:0:12}' after 90s, wanted ${STAMP:0:12}" >&2
+    echo "   refusing to measure with a probe that is not the one in this tree." >&2
+    exit 1
+  fi
+  sleep 1
+done
 
 echo "== 4/5 running $REPEAT cold start(s) as run-id $RUN_ID"
 # The probe ConfigMap ships coldstart-run.sh alongside the modules, so the pod
