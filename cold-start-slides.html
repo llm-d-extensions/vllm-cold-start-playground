@@ -247,18 +247,14 @@ table.data tr:last-child td{border-bottom:none;}
 <!-- Slide 3: Interactive timeline -->
 <section class="slide">
   <h2>Part 1 &middot; Where the time goes</h2>
-  <h1>The 43.2s timeline, and what a warm cache buys back</h1>
+  <h1>The 36.87s timeline, and what a warm cache buys back</h1>
   <div class="content">
     <div class="tp-row">
-      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">TP=1 &middot; controlled median</span><span class="val">43.30s</span><span class="unit">ready</span></div>
-      <div class="tp-badge tp2"><span class="dot"></span><span class="lbl">TP=2 &middot; controlled median of 3</span><span class="val">52.7s</span><span class="unit">ready &middot; baseline 94.7s, &minus;44% &middot; phases on the next two slides</span></div>
+      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">TP=1 &middot; controlled median</span><span class="val">36.87s</span><span class="unit">ready &middot; --load-format instanttensor &middot; median of 3, registry-warm &middot; <span class="cite">runs/lt1-it-*</span></span></div>
+      <div class="tp-badge tp2"><span class="dot"></span><span class="lbl">TP=2 &middot; controlled median of 3</span><span class="val">53.52s</span><span class="unit">ready &middot; --load-format instanttensor &middot; median of 3 &middot; unoptimized baseline 94.7s, &minus;43%</span></div>
     </div>
 
-    <div class="section-title">TP=1 phase breakdown, <em>second</em> boot (model-registry cache warm &mdash; see the next slide) &mdash; hover a segment, or hover a button to preview the hoist fix &middot; <a class="cite" href="reports/32b-step5-cs-fst-patch.txt">reports/32b-step5-cs-fst-patch.txt</a></div>
-    <div class="toggle" id="phasetoggle">
-      <button class="on" data-mode="measured">Measured &middot; 43.2s</button>
-      <button data-mode="projected">+ Hoist prologue (projected) &middot; ~39.2s</button>
-    </div>
+    <div class="section-title">TP=1 phase breakdown of the current best config, <em>second</em> boot (model-registry cache warm &mdash; see the next slide) &mdash; hover a segment &middot; <a class="cite" href="reports/lt1-it-c2-instanttensor.txt">runs/lt1-it-c2 &mdash; full report</a></div>
     <div class="stack-bar" id="phasebar"></div>
     <div class="legend" id="phaselegend"></div>
     <small class="note" id="phasenote"></small>
@@ -734,6 +730,21 @@ table.data tr:last-child td{border-bottom:none;}
         steady-state device memory <b>72.23 GiB in both arms</b>, measured against NVML.
         <span class="cite">runs/c2-*</span>.</p></div>
     </div>
+
+    <div class="section-title" style="margin-top:26px;">Re-measured on the current loader, because the numbers above predate it &mdash; median of 3, cycle 0 discarded, 8 boots &middot; <a class="cite" href="scripts/hoist-instanttensor.sh">scripts/hoist-instanttensor.sh</a> &middot; <a class="cite" href="reports/hoist-instanttensor-20260904-010720.txt">reports/hoist-instanttensor-&hellip;.txt</a></div>
+    <table class="data">
+      <tr><th>arm &mdash; <span class="cite">--load-format instanttensor</span>, TP=1, registry-warm</th><th>capture phase</th><th>ready</th><th>steady GPU (NVML)</th></tr>
+      <tr><td>upstream: prologue inside all 3366 captures &middot; <a class="cite" href="reports/hi1-base-c1-instanttensor-upstream.txt">median run</a></td><td>11.69s</td><td class="strong">37.67s</td><td>73.37 GiB</td></tr>
+      <tr style="background:color-mix(in srgb, var(--good) 9%, transparent);"><td><b>hoisted: one call after <span class="cite">capture_model</span></b> &middot; <a class="cite" href="reports/hi1-hoist-c1-instanttensor-hoisted.txt">median run</a></td><td><b>6.88s <span style="color:var(--good)">(&minus;4.81s)</span></b></td><td class="strong"><b>32.23s <span style="color:var(--good)">(&minus;5.44s)</span></b></td><td><b>73.37 GiB <span style="color:var(--good)">(+0.00)</span></b></td></tr>
+    </table>
+    <small class="note">So the fix survives the loader change &mdash; it was priced when weight load was 13.3s and it is
+    the same size now that weight load is 7.7s, which is what "independent phases" is supposed to mean. Per-cycle totals
+    37.67 / 39.35 / 37.42s (upstream) vs 32.23 / 31.33 / 33.40s (hoisted): the <em>slowest</em> hoisted cycle is 4.02s
+    ahead of the <em>fastest</em> upstream one. Two honest deductions: the ready delta is 0.63s larger than the phase
+    delta because python imports (10.23&rarr;9.67s) and warmup (3.86&rarr;3.66s) also drifted down in the hoisted
+    cycles, and neither is reachable by these two env knobs &mdash; read that as session noise; and this session's
+    upstream arm reads 37.67s where <span class="cite">runs/lt1-it-*</span> read 36.87s for the same config, so compare
+    arms inside this matrix, not across matrices.</small>
 
     <div class="gap-box" style="margin-top:14px;"><b>One trap, because it nearly produced the opposite conclusion:</b>
     vLLM's own <span class="cite">"took X GiB"</span> reports 2.87 GiB for the hoist arms too, which reads as "saves the
@@ -1331,43 +1342,27 @@ table.data tr:last-child td{border-bottom:none;}
     return row;
   }
 
-  /* ---------- Slide 3: phase stacked bar — measured vs projected-hoist ---------- */
+  /* ---------- Slide 3: phase stacked bar — measured, adopted config ---------- */
   var phaseData = {
     measured: {
-      total: 43.21,
-      note: 'This run’s own capture/warmup split predates the newer v2-runner probes (see the bottleneck slide for the refined, separately-measured 11.4s CUDA-graph-capture figure from <span class="cite">runs/w6-*</span>). <span class="cite">reports/32b-step5-cs-fst-patch.txt</span> already includes every adopted lever — pycache, fork, fastsafetensors, cs_fst.',
+      total: 36.87,
+      note: 'Median of 3 (35.9 / 36.9 / 37.9s), cycle 0 discarded, cycle-major interleaved against the other two loader arms — <span class="cite">runs/lt1-it-c1..c3</span>, phases rendered from the median run <a class="cite" href="reports/lt1-it-c2-instanttensor.txt">runs/lt1-it-c2</a>. Every lever this deck has adopted is on — warm bytecode cache, <span class="cite">fork</span>, <span class="cite">VLLM_ENABLE_STARTUP_PLAN=1</span> — plus the fastest loader measured in this pod, <span class="cite">--load-format instanttensor</span>, at <span class="cite">--max-model-len 8192</span>. Registry-warm second boot: a pod with a fresh <span class="cite">$VLLM_CACHE_ROOT</span> pays ~15s more (next slide). The container was CPU-throttled for <b>7.94s</b> of this boot against its 16-core limit, so imports and capture are both partly paying for a cgroup rather than for code.',
       phases: [
-        {name:'Interpreter boot + Python imports', t:10.24, s:1, opt:'Optimization applied: PYTHONPYCACHEPREFIX warm bytecode cache (adopted).', d:'Bytecode compile + 6781-file import graph. Halves with PYTHONPYCACHEPREFIX warm.'},
-        {name:'Setup & handshake', t:0.77, s:2, opt:'Optimization applied: none identified.', d:'Config/tokenizer resolve, hub metadata, weight-download HTTP, IPC handshake, device init.'},
-        {name:'Weight load', t:13.3, s:3, opt:'Optimization applied: --load-format fastsafetensors + cs_fst patch (nogds, threads, buffer) — both adopted. Superseded since: --load-format instanttensor puts this phase at 7.70s with no patch at all (see the loader slides).', d:'safetensors open/read/convert. Called a ceiling phase here — it was not one. Storage was never the bottleneck; read concurrency and an unpinned host staging buffer were.'},
-        {name:'KV cache alloc', t:2.09, s:4, opt:'Optimization applied: VLLM_ENABLE_STARTUP_PLAN (adopted) — skips ~0.6s of memory profiling on a fingerprint match.', d:'KV cache sizing and allocation.'},
-        {name:'Compile & graph capture', t:1.79, s:5, opt:'Optimization applied: none beyond torch.compile’s own AOT cache hit (0.04s) — this is not the 3366-prologue cost below.', d:'torch.compile (0.04s, AOT cache hit) + this run’s own cudagraph capture span (1.75s).'},
-        {name:'Warmup / profile run', t:11.3, s:6, opt:'Optimization applied: none yet — this span still pays torch’s per-capture synchronize()+empty_cache(), run 3366 times. Hover “+ Hoist prologue” above to see the projected fix.', d:'Dummy runs + memory profiling. In runs/w6-* this same territory refines to an 11.4s capture-specific figure — see the bottleneck slide.'},
-        {name:'API server & orchestration', t:3.72, s:7, opt:'Optimization applied: none identified.', d:'uvicorn/app build/routes + containing spans + 11ms unaccounted.'}
-      ]
-    },
-    projected: {
-      total: 39.21,
-      note: '<b>Projection, not a new run:</b> the measured 43.2s baseline with the 3366-call synchronize()+empty_cache() prologue hoisted out of <span class="cite">Warmup / profile run</span> — one call after <span class="cite">capture_model</span> instead of inside every capture. The −4.0s / +0.00 GiB delta is measured end-to-end (<span class="cite">runs/c2-nofreeonce</span>); only its placement inside this older per-run phase split is projected. Not yet upstreamed. <a class="cite" href="docs/concurrent-cudagraph-capture.md#4b-the-prerequisite-is-the-result-40s">docs/concurrent-cudagraph-capture.md &sect;4b</a>.',
-      phases: [
-        {name:'Interpreter boot + Python imports', t:10.24, s:1, opt:'Optimization applied: PYTHONPYCACHEPREFIX warm bytecode cache (adopted) — unchanged by the hoist.', d:'Bytecode compile + 6781-file import graph.'},
-        {name:'Setup & handshake', t:0.77, s:2, opt:'Optimization applied: none — unchanged by the hoist.', d:'Config/tokenizer resolve, hub metadata, weight-download HTTP, IPC handshake, device init.'},
-        {name:'Weight load', t:13.3, s:3, opt:'Optimization applied: fastsafetensors + cs_fst patch (adopted) — unchanged by the hoist, and independent of it: instanttensor takes this phase to 7.70s and the two fixes compose.', d:'safetensors open/read/convert.'},
-        {name:'KV cache alloc', t:2.09, s:4, opt:'Optimization applied: VLLM_ENABLE_STARTUP_PLAN (adopted) — unchanged by the hoist.', d:'KV cache sizing and allocation.'},
-        {name:'Compile & graph capture', t:1.79, s:5, opt:'Optimization applied: none — unchanged by the hoist.', d:'torch.compile AOT cache hit + this run’s own capture span.'},
-        {name:'Warmup / profile run — prologue hoisted', t:7.30, s:6, opt:'Optimization projected: hoist torch’s synchronize()+empty_cache() out of the 3366-iteration capture loop into one call after capture_model. −4.0s, +0.00 GiB steady-state GPU memory, measured end-to-end. Not yet upstreamed — docs/concurrent-cudagraph-capture.md §4b.', d:'Same dummy runs + memory profiling, minus the 3366 per-capture device-syncs and frees the measured run still pays.'},
-        {name:'API server & orchestration', t:3.72, s:7, opt:'Optimization applied: none — unchanged by the hoist.', d:'uvicorn/app build/routes + containing spans.'}
+        {name:'Interpreter boot + Python imports', t:10.25, s:1, opt:'Optimization applied: PYTHONPYCACHEPREFIX warm bytecode cache + VLLM_WORKER_MULTIPROC_METHOD=fork (both adopted).', d:'40ms of interpreter boot, then 6040 modules — 7.44s of module exec in the api_server process alone (torch 2.07s, transformers 1.20s, vllm 985ms, openai 615ms). Still the second-largest phase after every adopted fix.'},
+        {name:'Setup & handshake', t:0.84, s:2, opt:'Optimization applied: none identified.', d:'Config/tokenizer resolve 74ms, model-registry resolve 9ms (warm), hub metadata 693ms of HTTP, weight download 31ms, IPC handshake 30ms, device & collectives init 1ms.'},
+        {name:'Weight load', t:7.70, s:3, opt:'Optimization applied: --load-format instanttensor — the fastest loader measured in this pod, with no monkey-patch, and 5.99s faster on this phase than the loader arm this deck published first. See the loader slides.', d:'61.02 GiB off GPFS. weights.load_weights 6.26s of it, with no probe underneath — an opaque block, flagged as a dark span in the run’s own findings.'},
+        {name:'KV cache alloc', t:0.02, s:4, opt:'Optimization applied: VLLM_ENABLE_STARTUP_PLAN=1 (adopted, pinned on every run in this deck).', d:'The allocation itself is 16ms. The memory profiling the startup plan claims to skip still executes — 2.11s of kvcache.determine_memory, credited to Warmup / profile run below.'},
+        {name:'CUDA graph capture', t:10.80, s:5, opt:'Optimization applied: none yet — the largest phase on this slide. Its one lever is now measured on this exact config: hoisting torch’s per-capture prologue takes the phase 11.69s→6.88s and time-to-ready 37.67s→32.23s (median of 3, runs/hi1-*), at +0.00 GiB. Not upstreamed. See the capture slides.', d:'102 captures: capture_forward 6.84s of CPU recording, warmup_forward 1.91s of eager forwards, capture_begin 1.87s — torch’s per-capture synchronize()+empty_cache() prologue, paid inside every capture. torch.compile itself is 0.00s here, an AOT cache hit.'},
+        {name:'Warmup / profile run', t:3.79, s:6, opt:'Optimization applied: none identified.', d:'kvcache.determine_memory 2.11s (dummy_run 1.70s), plus warmup_kernels 546ms, freeze_gc_heap 449ms, jit_monitor_activate 413ms, kernel_warmup 256ms.'},
+        {name:'API server & orchestration', t:3.47, s:7, opt:'Optimization applied: none identified.', d:'engine.async_llm_init 2.42s + uvicorn/app build/routes 936ms; a further 7ms of the boot is unaccounted. The engine-core process only execs at t+12.1s, so this is largely serialisation, not work.'}
       ]
     }
   };
-  var phaseMode = 'measured';
   function renderPhaseBar(mode){
-    phaseMode = mode;
     var data = phaseData[mode];
     var bar = document.getElementById('phasebar');
     var legend = document.getElementById('phaselegend');
     bar.innerHTML = ''; legend.innerHTML = '';
-    bar.style.width = Math.max(data.total/phaseData.measured.total*100, 45)+'%';
     data.phases.forEach(function(p){
       var pct = p.t/data.total*100;
       var seg = document.createElement('div');
@@ -1382,23 +1377,7 @@ table.data tr:last-child td{border-bottom:none;}
       legend.appendChild(li);
     });
     document.getElementById('phasenote').innerHTML = data.note;
-    var toggle = document.getElementById('phasetoggle');
-    Array.prototype.forEach.call(toggle.querySelectorAll('button'), function(b){
-      b.classList.toggle('on', b.getAttribute('data-mode')===mode);
-    });
   }
-  (function(){
-    var toggle = document.getElementById('phasetoggle');
-    toggle.addEventListener('mouseover', function(e){
-      var btn = e.target.closest('button'); if(!btn) return;
-      var mode = btn.getAttribute('data-mode');
-      if (mode !== phaseMode) renderPhaseBar(mode);
-    });
-    toggle.addEventListener('focusin', function(e){
-      var btn = e.target.closest('button'); if(!btn) return;
-      renderPhaseBar(btn.getAttribute('data-mode'));
-    });
-  })();
   renderPhaseBar('measured');
 
   /* ---------- Slide 3: demo TP1 vs TP2 single-run bars ---------- */
@@ -1407,7 +1386,7 @@ table.data tr:last-child td{border-bottom:none;}
     var max = 95.79;
     wrap.appendChild(barRow('TP=1 &middot; demo boot', '<br><a class="cite" href="reports/demo-cold-start-tp1-20260903-105740.txt">reports/demo-cold-start-tp1-&hellip;.txt</a>',
       '52.44s', 'ready', 52.44/max*100, 'var(--s1)', 'TP=1 demo boot — 52.44s',
-      'Live demo run, "best config, warm PVC, forkserver, fastsafetensors." Single sample, not a median — do not compare directly to the 43.30s controlled ladder.'));
+      'Live demo run, "best config, warm PVC, forkserver," on the loader arm this deck published first. Single sample, not a median — do not compare directly to a controlled ladder median.'));
     wrap.appendChild(barRow('TP=2 &middot; demo boot', '<br><a class="cite" href="reports/demo-cold-start-tp2-20260903-110308.txt">reports/demo-cold-start-tp2-&hellip;.txt</a>',
       '95.79s', 'ready — 1.83× TP=1', 100, 'var(--s2)', 'TP=2 demo boot — 95.79s',
       'Same script, same config shape, two workers (pids logged). Single sample. No phase breakdown exists to explain the 1.83×.'));
@@ -1423,7 +1402,7 @@ table.data tr:last-child td{border-bottom:none;}
     ],
     warm: [
       {label:'Bytecode cache (imports)', sub:'<br>spawn, PYTHONPYCACHEPREFIX warm', val:'16.6s', pct:44.1, tip:'Ladder step 2 — same imports, warm .pyc cache. −22.31s off the full boot total. With fork also on (step 3’s config): 22.40s → 10.50s.'},
-      {label:'Model weight load', sub:'<br>default loader, warm page cache', val:'~30s', pct:48.4, tip:'GPFS pagepool warm. The ladder’s final 13.3s figure additionally stacks fastsafetensors + the cs_fst patch on top of this warm baseline.'},
+      {label:'Model weight load', sub:'<br>default loader, warm page cache', val:'~30s', pct:48.4, tip:'GPFS pagepool warm, default loader. The adopted config additionally swaps the loader on top of this warm baseline, which is what takes the phase to 7.70s — see the loader slides.'},
       {label:'Startup plan (memory profiling)', sub:'<br>Qwen2.5-1.5B illustration, not 32B', val:'1.37s', pct:68.2, tip:'Fingerprint matched, profiling context skipped — but profile_run() itself still executes (a logged-but-not-actually-skipped bug). −0.64s, not −1.9s.'},
       {label:'Model registry (modelinfos)', sub:'<br>modelinfos/&lt;module&gt;-&lt;class&gt;.json present', val:'0.0002s', pct:0.0013, tip:'A hash of the model module\u2019s bytes plus a JSON read: 0.2ms isolated, 10-33ms inside a real boot, a 40575x difference. Keyed on that hash, so it is paid once per (vLLM build, model module) per cache volume. Every ladder number in this deck except the first-boot slide was measured with this file already present.'}
     ]

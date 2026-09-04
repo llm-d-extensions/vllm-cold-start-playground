@@ -1,0 +1,80 @@
+does the capture-prologue hoist still pay on the current loader?
+model=Qwen/Qwen3-32B TP=1 max-model-len=8192 --load-format instanttensor
+runs/hi1-*  scripts/hoist-instanttensor.sh  ns=lionel-cold-start pod=vllm-coldstart
+8 boots, 4 cycles, arms interleaved cycle-major, cycle 0 discarded -> median of 3
+registry-warm second boots, same conditions as runs/lt1-it-* (the 36.87s ladder median)
+
+WHY: the -4.0s hoist (docs/concurrent-cudagraph-capture.md 4b) was measured on the
+fastsafetensors+cs_fst arm, when weight load was 13.3s and time-to-ready 43.2s. The
+loader has since changed to --load-format instanttensor (7.70s weight load, 36.87s
+ready), which touches nothing in the capture phase -- so the hoist SHOULD compose.
+The slides were quoting that as a projection. This measures it.
+
+  base   upstream capture path: torch's synchronize()+empty_cache() prologue inside
+         all 3366 captures
+  hoist  CS_CGSYNC=none CS_CGEMPTY=once -- the prologue moved out of the loop: one
+         call after capture_model, none per capture (the `nofreeonce` arm of
+         scripts/cudagraph-pool-matrix.sh, i.e. the shape an upstream patch takes)
+
+=== per-arm medians (analysis/loader_ladder.py, cycle 0 dropped) ===
+arm           n   ready weight load python impo warmup / pr kv cache al cudagraph c engine orch
+-----------------------------------------------------------------------------------------------
+base          3  37.67s       7.82s      10.23s       3.86s       0.02s      11.69s       2.63s   (+0.00s)
+hoist         3  32.23s       7.60s       9.67s       3.66s       0.02s       6.88s       2.59s   (-5.44s)
+
+base         totals per cycle: 37.67s, 39.35s, 37.42s
+hoist        totals per cycle: 32.23s, 31.33s, 33.40s
+
+=== inside the capture phase (analysis/cudagraph_capture_matrix.py, all 4 cycles) ===
+arm                 n   capture  spread   cap_fwd  warm_fwd   cap_beg    `-sync pool GiB  engaged
+-------------------------------------------------------------------------------------------------
+hi1-base            4   11.326s  0.969s    6.961s    1.974s    2.045s    1.758s     1.84  upstream
+hi1-hoist           4    6.893s  0.504s    3.757s    1.898s    0.000s    0.000s     2.87  nosync x3366, noempty x3366, hoisted free
+
+per-run graph pool, as vLLM reports it:
+  hi1-base-c0      1.84 GiB   captures=102
+  hi1-base-c1      1.84 GiB   captures=102
+  hi1-base-c2      1.84 GiB   captures=102
+  hi1-base-c3      1.84 GiB   captures=102
+  hi1-hoist-c0     2.87 GiB   captures=102
+  hi1-hoist-c1     2.87 GiB   captures=102
+  hi1-hoist-c2     2.87 GiB   captures=102
+  hi1-hoist-c3     2.87 GiB   captures=102
+
+=== steady-state device memory (analysis/gpu_steady_memory.py, NVML, end of run) ===
+arm                n steady GiB   spread   peak GiB  per-run steady
+-------------------------------------------------------------------
+hi1-base           4      73.37     0.00      73.37  73.37 73.37 73.37 73.37
+hi1-hoist          4      73.37     0.00      73.37  73.37 73.37 73.37 73.37
+
+deltas vs the first arm listed (73.37 GiB):
+  hi1-base         +0.00 GiB
+  hi1-hoist        +0.00 GiB
+
+sampled over 35s per run, median of the last 3s
+
+VERDICT: the hoist composes with the current loader, and pays more here than the
+         projection claimed. Capture phase 11.69s -> 6.88s (-4.81s), time to ready
+         37.67s -> 32.23s (-5.44s), steady-state device memory 73.37 GiB in BOTH
+         arms (+0.00 GiB). The slowest hoist cycle (33.40s) is still 4.02s faster
+         than the fastest base cycle (37.42s), against within-arm spreads of
+         1.93s (base) and 2.07s (hoist).
+
+CAVEATS
+  * the ready delta (-5.44s) is larger than the capture delta (-4.81s) because
+    python imports (10.23 -> 9.67s) and warmup (3.86 -> 3.66s) also came out lower
+    in the hoist cycles. Neither phase can be touched by CS_CGSYNC/CS_CGEMPTY, so
+    read that ~0.6s as session drift, not as part of the effect.
+  * this session's base arm reads 37.67s where runs/lt1-it-* measured 36.87s for
+    the same configuration. Node state drifts between sessions; compare arms
+    within this matrix, not across matrices.
+  * vLLM's own "Graph capturing finished ... took X GiB" reports 2.87 GiB for the
+    hoist arm vs 1.84 GiB for base, which reads as "saves the time, not the
+    memory". It cannot do otherwise: the delta is measured inside capture_model
+    (model_runner.py:871,901), so a free issued after the loop is invisible to it.
+    NVML sampled to the end of the run is the number an operator pays, and it is
+    identical in both arms.
+  * torch._C._host_emptyCache() runs in the same prologue and this probe cannot
+    reach it, so the saving remains a lower bound.
+  * still not upstreamed, and still TP=1 only: the TP=2 split of this phase has
+    never been measured per rank.
