@@ -840,16 +840,26 @@ was never testable here. A same-node arm was not repeated after the fix; it is t
 strictly weaker claim and is subsumed by the cross-node result.
 
 AND A CORRECTION TO THE 4.07s. On this pod the win against cache-warm cold
-controls is 4.66s (restore 51.44s mean n=3, cold 54.96s / 57.23s), which is the
-same effect and the same order, and it closes against its own bound: cold-3's log
-puts interpreter startup plus imports at ~7s (poller start 18:03:55, vLLM's first
-output 18:04:02), restore costs 1.85s, so the bound is ~5.2s and 4.66s sits inside
-it. It closes only in the mean, though. Per-arm the win is 3.52s against one cold
-control and 5.79s against the other, which straddles the bound -- against the
-slower control alone it would violate it. The cold arms are 2.27s apart across n=2
--- roughly half the size of the effect -- the bound is itself only good to about
-+/-1s because vLLM's log timestamps have 1-second resolution, and restore is not
-flat either: 56.16s has
+controls is 4.45s -- restore 51.44s (n=3, spread 0.42s) against cold 55.89s (n=3:
+54.96s / 57.23s / 55.49s, spread 2.27s) -- the same effect and the same order as
+4.07s, and it closes against its own bound. The bound is computed from the cold
+arms' OWN measured imports, not the build-time constant, which is the error the A2
+investigation made: two arms have a recoverable import phase, 7s for cold-3
+(poller start 18:03:55, vLLM's first output 18:04:02) and 6s for cold-4, mean 6.5s,
+against a mean criu restore of 1.847s. Bound 4.65s, measured 4.45s, inside it by
+~0.2s. Reassuringly that 6.5s was derived from the cold arms independently and
+lands near the build-time preload constant of 6.53s.
+
+It closes in the mean, and per-arm it straddles. Win against cold-2 is 3.52s,
+against cold-4 4.05s (own bound 4.15s -- inside by 0.10s), against cold-3 5.79s
+(own bound 5.15s -- OVER by 0.64s). The overshoot is most likely resolution, not a
+real violation: vLLM's log timestamps are 1-second granular, so each per-arm bound
+carries about +/-1s, and cold-4 exists precisely because cold-2's preboot.log was
+overwritten before capture (criu-preboot.sh writes it to a fixed path) leaving the
+bound resting on cold-3 alone. With cold-4 added, one of the two checkable arms
+closes cleanly and one overshoots by less than the resolution. Note also that the
+cold arms are 2.27s apart at n=3 -- half the size of the effect -- and restore is
+not flat either: 56.16s has
 been seen where earlier arms gave 51.38s / 52.20s, so the earlier apparent
 flatness held at n=2 by chance. The 4.07s figure and its "accounting closes to
 0.13s" do NOT reproduce to that precision on a shared node. The lever is real and

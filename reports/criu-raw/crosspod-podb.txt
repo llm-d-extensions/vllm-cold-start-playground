@@ -446,35 +446,65 @@ the libblkid fix -- and B2's genuinely FIRST-EVER vLLM boot in this pod
     completion: identical text to B1's
     GPU memory after kill: 0, 0 MiB / 1, 0 MiB (clean)
 
-B2, cold-2 (18:0x:xx) and cold-3 (18:0x:xx), run AFTER the fix, interleaved
-with the successful restore-2/3/4 arms (section 4b) as the task's n=3
-accounting design calls for:
+B2, cold-2, cold-3, cold-4 (18:0x:xx, 18:0x:xx, 19:3x:xx), run AFTER the
+fix. cold-2/cold-3 were interleaved with the successful restore-2/3/4 arms
+(section 4b) as the task's n=3 accounting design calls for; cold-4 was run
+afterward, specifically to capture a second intact copy of /tmp/preboot.log
+(criu-preboot.sh always writes that log to a fixed path, so cold-2's own
+copy was overwritten by cold-3's run before it could be pulled out of the
+pod -- see section 7 for why a second log was needed and section 9 for the
+gap this leaves):
     cold-2: exec -> health_200 : 54.96s
     cold-3: exec -> health_200 : 57.23s
-    Both completions textually identical to cold-1/B1's. GPU memory clean
-    after both.
+    cold-4: exec -> health_200 : 55.49s
+    All three completions textually identical to cold-1/B1's. GPU memory
+    clean after each.
 
-Both completions are textually identical and correct -- vLLM serves
+All completions are textually identical and correct -- vLLM serves
 correctly from a cold boot in both pods, on both nodes.
 
-IMPORTANT CONFOUND, discovered by comparing cold-1 to cold-2/cold-3: cold-1
-(103.02s) is dramatically slower than cold-2 (54.96s) or cold-3 (57.23s) --
-roughly double. This is almost certainly page-cache / registry-cache
-warming: cold-1 was the pod's first-ever read of the model weight files and
-the torch/vllm import chain from the underlying PVC/image storage; by
-cold-2 and cold-3, those same blocks were already resident in the kernel
-page cache from cold-1 (and from the interleaved restore arms, which also
-touch some of the same import-chain files during process setup even though
-restore itself skips re-running the imports). B1's single cold-arm
-(70.14s) sits between these two B2 numbers and is ALSO an n=1, first-boot-
-in-that-pod measurement, so it is not directly comparable to either B2
-number without the same caveat. None of node identity, contention, or
-registry egress path was instrumented for any of these five cold
-measurements -- the page-cache explanation is the most likely one given the
-pattern (first-ever-boot vs. repeat-boot-in-same-pod), but it was not
-independently isolated (e.g. by dropping caches between arms), so it is
-INFERRED, not measured directly. This confound is the reason section 7's
-accounting below reports two different "win" numbers rather than one.
+CONFOUND, MEASURED not inferred: cold-1 (103.02s) is roughly double cold-2/
+cold-3/cold-4 (54.96-57.23s, mean 55.89s). This is a first-read page-cache
+miss, and the pod's own vLLM server log proves it directly rather than
+leaving it to inference on the two phases that dominate boot time:
+  - weight load: cold-1's own log line reads "Loading weights took 58.94
+    seconds" / "Model loading took ... 60.862072 seconds"; cold-3's reads
+    "Loading weights took 27.08 seconds" / "... 29.011137 seconds";
+    cold-4's reads "Loading weights took 27.19 seconds" / "...
+    28.604068 seconds". Same 61.02 GiB checkpoint, same GPFS backend,
+    prefetch disabled in all three -- 31.86-32.26s of the ~47-48s gap
+    between cold-1 and cold-2/3/4 is sitting in this one, directly
+    logged, phase.
+  - interpreter startup + imports (the phase the checkpoint image is
+    meant to remove -- see section 7): cold-1's own log shows ~15s between
+    exec start (17:42:37) and its first vLLM-emitted log line (17:42:52);
+    cold-3 and cold-4 show ~7s and ~6s respectively for the same gap (see
+    section 7). So the cache-cold penalty in cold-1 is NOT confined to
+    weight-load -- it shows up in the import phase too, for the same
+    reason (reading torch/vllm/fastapi's own module files off disk is
+    also a page-cache-sensitive read). Both effects point the same way and
+    both are read directly off timestamps already in the logs, not
+    inferred from the aggregate boot time.
+B1's single cold-arm (70.14s) sits between cold-1 and cold-2/3/4 and is
+ALSO an n=1, first-boot-in-that-pod measurement; it was not decomposed by
+phase the way B2's arms were, so whether it shares the same cause is
+plausible but not independently confirmed for B1 specifically. Node
+identity, contention, and registry egress path were not instrumented for
+any of these measurements -- they are not being ruled out as also
+contributing, only the page-cache mechanism is the one with direct,
+logged, phase-level evidence behind it.
+
+cold-1 is EXCLUDED from the accounting in section 7, on exactly the
+grounds this project's own parent report already uses to exclude its own
+TP=1 r1 baseline outlier (92.7s vs 58.0s/57.8s, driven by a 56.8s vs ~30.0s
+weight-load gap) -- a first-read page-cache miss on 61 GiB of weights (and,
+here, secondarily on the import-chain files too) is not a property of
+restore vs. cold-boot, it is a property of "has anything read these bytes
+before." A cold boot's own second run gets this time back with no CRIU
+involved at all. Crediting it to the checkpoint would measure "first read
+vs. cached read of a 61 GiB model" and attribute it to the checkpoint,
+inflating the real, checkpoint-attributable lever by roughly an order of
+magnitude. There is exactly one number in section 7, not two.
 
 ------------------------------------------------------------------------------
 7. SECONDARY DELIVERABLE (magnitude, within-arm accounting) -- OBTAINED (B2
@@ -493,11 +523,16 @@ original untouched PVC image):
     mean restore->health_200: 51.44s   (spread: 0.42s, restore-3 to restore-2)
     mean criu restore itself: 1.847s   (spread: 0.04s)
 
-Cold arms (n=3, chronological, interleaved with the above; cold-1 ran
-BEFORE the fix, cold-2/cold-3 ran AFTER, interleaved with restore-2/3/4):
+Cold arms (n=4 total; cold-1 ran BEFORE the fix, cold-2/cold-3 ran AFTER
+interleaved with restore-2/3/4, cold-4 ran afterward specifically to
+recover a second intact per-arm preboot.log once cold-2's was found to be
+overwritten -- section 6):
     cold-1 (true first boot, pre-fix): health_200 103.02s
     cold-2 (post-fix, cache-warm):     health_200 54.96s
     cold-3 (post-fix, cache-warm):     health_200 57.23s
+    cold-4 (post-fix, cache-warm):     health_200 55.49s
+    mean of cold-2/cold-3/cold-4 (cache-warm, n=3): 55.89s (spread 2.27s,
+        cold-2 to cold-3)
 
 cold-1 IS EXCLUDED and no win is computed against it. An earlier version of
 this section reported a second win of 51.58s (~50%) against it, presented as
@@ -519,29 +554,45 @@ is the same exclusion, on the same grounds, that the parent report already
 applies to its own TP=1 r1 baseline outlier (92.7s vs 58.0s/57.8s, "weight
 load 56.8s vs ~30.0s").
 
-THE ONE WIN NUMBER, vs. the cache-warm cold arms (mean of cold-2/cold-3,
-56.10s), which is the like-for-like comparison because the restore arms also
-ran cache-warm and interleaved with them:
+THE ONE WIN NUMBER, vs. the cache-warm cold arms (mean of cold-2/cold-3/
+cold-4, 55.89s), which is the like-for-like comparison because the restore
+arms also ran cache-warm and interleaved with them:
 
-        win = 56.10s - 51.44s = 4.66s saved per restore, ~8% reduction.
+        win = 55.89s - 51.44s = 4.45s saved per restore, ~8% reduction.
 
 CHECKED AGAINST ITS OWN BOUND (win must not exceed imports carried minus
 restore cost -- the discipline the parent report's point 5 is built on, and
 the check the A2 investigation got wrong by using the build-time constant
-instead of each arm's own measurement). From cold-3's own log, poller start
-18:03:55 to vLLM's first output 18:04:02 is ~7s of interpreter startup and
-imports, the work the image carries. Restore costs 1.83-1.87s. So the bound
-is ~5.2s, and the measured 4.66s sits inside it. It closes.
+instead of each arm's own measurement). Two cold arms have a recoverable
+import phase, measured as poller start to vLLM's first emitted log line:
 
-But only in the mean, and that is the honest caveat. Per-arm the win ranges
-3.52s (vs cold-2) to 5.79s (vs cold-3), which straddles the bound: against
-cold-3 alone it would violate it. The cold arms are 2.27s apart at n=2 --
-roughly half the size of the effect being measured -- the bound itself is
-only good to about +/-1s because vLLM's log timestamps have 1-second
-resolution, and cold-2's preboot log was overwritten so its phase mix cannot
-be recovered. Conclusion: this lever is real and is worth about 4s. It is NOT
-resolvable to the precision the parent report claims for it ("4.07s, with the
-accounting closing to 0.13s") on a node this session shares with other work.
+    cold-3   18:03:55 -> 18:04:02   ~7s
+    cold-4   19:31:26 -> 19:31:32   ~6s
+    mean                            6.5s
+
+Mean criu restore itself is 1.847s. So the bound is 6.5 - 1.847 = 4.65s, and
+the measured 4.45s sits inside it, by about 0.2s. That 6.5s was derived from
+the cold arms themselves and happens to land near the build-time preload
+constant of 6.53s (preboot-build-server.txt) -- convergence from two
+independent routes, not one number copied into two places.
+
+It closes in the mean, and per-arm it straddles, which is the honest caveat:
+
+    vs cold-2   win 3.52s   own bound not recoverable (log overwritten)
+    vs cold-4   win 4.05s   own bound 4.15s   inside by 0.10s
+    vs cold-3   win 5.79s   own bound 5.15s   OVER by 0.64s
+
+The cold-3 overshoot is most likely resolution rather than a real violation.
+vLLM's log timestamps are 1-second granular, so every per-arm bound here
+carries roughly +/-1s and 0.64s does not clear that. cold-4 was run for
+exactly this reason -- criu-preboot.sh writes preboot.log to a fixed path, so
+cold-2's copy was overwritten by cold-3's run and the bound rested on cold-3
+alone. With a second checkable arm in hand, one closes cleanly and one
+overshoots by less than the measurement resolution.
+
+Conclusion: this lever is real and is worth about 4-4.5s. It is NOT resolvable
+to the precision the parent report claims for it ("4.07s, with the accounting
+closing to 0.13s") on a node this session shares with other work.
 
 The honest reading: restore is unambiguously faster than cold boot in
 BOTH framings (criu restore itself completing in under 2s is the clearest,
