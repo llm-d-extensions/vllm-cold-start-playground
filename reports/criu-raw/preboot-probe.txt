@@ -1,0 +1,9 @@
+[13:16:17] import-stage probe (no dump): where does the driver first appear?
+start pid=18840 nvidia_fds=0 rss=0.01GiB
+stage=torch took=1.00s cumulative=1.00s nvidia_fds=0 rss=0.50GiB threads=16
+stage=vllm took=1.70s cumulative=2.70s nvidia_fds=0 rss=0.71GiB threads=17
+stage=server took=3.44s cumulative=6.15s nvidia_fds=11 rss=0.95GiB threads=32
+preload done cumulative=6.15s nvidia_fds=11 rss=0.95GiB
+PROBE-ONLY: exiting without waiting
+
+[13:16:24] verdict: the checkpoint point is the last stage with nvidia_fds=0

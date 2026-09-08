@@ -1,0 +1,71 @@
+======================================================================
+criu-nvml-isolate: which fd blocks the dump, with zero device memory
+[reaper] subreaper armed, pid=29987
+criu Version: 4.1.1   plugins: cuda_plugin.so 
+======================================================================
+[14:04:30] child pid=29997
+    start nvidia_fds=0
+    after import torch nvidia_fds=0
+    after import vllm  nvidia_fds=0
+    after server graph nvidia_fds=11
+    cuda initialised? False  device mem allocated=0
+
+[14:04:30] (a) the fds it holds, with no device memory allocated:
+[14:04:30]     count=11
+      fd 10 -> /dev/nvidiactl
+      fd 11 -> /dev/nvidia2
+      fd 12 -> /dev/nvidia3
+      fd 13 -> /dev/nvidia-uvm
+      fd 14 -> /dev/nvidia-caps/nvidia-cap1
+      fd 15 -> /dev/nvidia-caps/nvidia-cap2
+      fd 16 -> /dev/nvidia-uvm
+      fd 17 -> /dev/nvidia2
+      fd 18 -> /dev/nvidia2
+      fd 19 -> /dev/nvidia3
+      fd 20 -> /dev/nvidia3
+      gpu 0, 0 MiB
+      gpu 1, 0 MiB
+
+[14:04:30] (b) what does cuda-checkpoint make of this process?
+[14:04:31]     --get-state: running
+[14:04:31]     --action checkpoint rc=1 -- Could not checkpoint on process ID 29997: "the operation cannot be performed in the present state" 
+[14:04:31]     nvidia_fds after: 11
+
+[14:04:31] (c) can criu dump it as-is?
+[14:04:36]   criu dump [nvml-open] rc=0  image=609M  log=/criu/img/nvml-isolate-nvml-open/dump.log
+      (02.179373) cuda_plugin: Checkpointing CUDA devices on pid 29997 restore_tid 30019
+      (03.016346) cuda_plugin: finished cuda_plugin stage 0 err 0
+      (03.539163) cuda_plugin: resuming devices on pid 29997
+      (03.539180) cuda_plugin: Restore thread pid 30019 found for real pid 29997
+
+[14:04:36] (d) ask the process to call pynvml.nvmlShutdown()
+    nvmlShutdown() raised NVMLError_Uninitialized: Uninitialized
+    vllm.platforms.cuda present; attrs: NonNvmlCudaPlatform,NvmlCudaPlatform,import_pynvml,nvml_available,pynvml,with_nvml_context
+    post-shutdown nvidia_fds=11
+[14:04:37]     nvidia_fds now: 11
+      fd 11 -> /dev/nvidiactl
+      fd 12 -> /dev/nvidia2
+      fd 13 -> /dev/nvidia-uvm
+      fd 15 -> /dev/nvidia2
+      fd 16 -> /dev/nvidia-uvm
+      fd 17 -> /dev/nvidia2
+      fd 18 -> /dev/nvidia3
+      fd 19 -> /dev/nvidia3
+      fd 20 -> /dev/nvidia3
+      fd 22 -> /dev/nvidia-caps/nvidia-cap1
+      fd 23 -> /dev/nvidia-caps/nvidia-cap2
+
+[14:04:37] (e) can criu dump it now?
+[14:04:41]   criu dump [nvml-closed] rc=0  image=609M  log=/criu/img/nvml-isolate-nvml-closed/dump.log
+      (02.187583) cuda_plugin: Checkpointing CUDA devices on pid 29997 restore_tid 30019
+      (03.016287) cuda_plugin: finished cuda_plugin stage 0 err 0
+      (03.542502) cuda_plugin: resuming devices on pid 29997
+      (03.542523) cuda_plugin: Restore thread pid 30019 found for real pid 29997
+
+[14:04:41] cleanup
+
+=== VERDICT ===========================================================
+If (c) failed and (e) succeeded, the blocking fd is an NVML handle and
+nothing about CUDA context state is involved.
+=======================================================================
+EXIT: 0

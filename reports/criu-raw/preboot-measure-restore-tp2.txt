@@ -1,0 +1,26 @@
+[reaper] subreaper armed, pid=57916
+[14:32:04] arm=restore tp=2  gpu=0, 0 MiB 1, 0 MiB 
+[14:32:04]   evicted 0.42 GiB
+[14:32:06]   criu restore rc=0 in 1.91s
+[14:32:58]   restore start -> health_200: 54.70s
+[14:32:59]   restore start -> completion: 55.18s   out: ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+[14:32:59]   child log:
+    start pid=57825 nvidia_fds=0 rss=0.01GiB
+    stage=torch took=0.97s cumulative=0.97s nvidia_fds=0 rss=0.50GiB threads=16
+    stage=vllm took=1.69s cumulative=2.66s nvidia_fds=0 rss=0.70GiB threads=17
+    preload done cumulative=2.66s nvidia_fds=0 rss=0.70GiB
+    resumed after restore at 1788532326.226 nvidia_fds=0
+    exec vllm serve in-process: vllm serve --model Qwen/Qwen3-32B --max-model-len 8192 --tensor-parallel-size 2 --port 8400
+
+=== MEASURE arm=restore stage=vllm tp=2 ===============
+criu restore         : 1.91s
+restore -> health_200: 54.70s
+restore -> completion: 55.18s
+completion           : ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+image                : /criu/img/preboot-vllm (0.42 GiB)
+==========================================================
+[reaper] reaped orphan 57825
+[reaper] reaped orphan 58205
+[reaper] reaped orphan 58206
+[reaper] reaped orphan 58396
+[reaper] reaped orphan 58397

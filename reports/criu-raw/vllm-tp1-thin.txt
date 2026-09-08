@@ -1,0 +1,42 @@
+[reaper] subreaper armed, pid=4810
+======================================================================
+criu-vllm-probe  arm=thin tp=1 model=Qwen/Qwen3-32B max-model-len=8192
+criu Version: 4.1.1   cc Version 580.105.08.
+image dir: /criu/img/vllm-tp1-thin   log: /tmp/criu-vllm-tp1-thin.log
+gpu at start: 0, 0 MiB 1, 0 MiB 
+container mem limit: unknown
+======================================================================
+[13:11:15] step 1: cold boot (this is the number the restore has to beat)
+[13:12:15]   health_200 at 59.75s   gpu=0, 74629 MiB 1, 4 MiB 
+[13:12:16]   baseline completion: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+[13:12:16]   tree: 4836(vllm) 5154(VLLM::EngineCor) 
+[13:12:16]   pids holding /dev/nvidia*: 4836 5154 
+[13:12:16]   tree RSS before park: 3.96 GiB
+[13:12:16] step 2: /sleep?level=2 then cuda-checkpoint
+[13:12:16]     after sleep level 2: gpu=0, 2681 MiB 1, 4 MiB 
+[13:12:16]     cc lock pid=4836 (vllm): ok in 0.06s
+[13:12:16]     cc checkpoint pid=4836 (vllm): ok in 0.07s
+[13:12:16]     cc lock pid=5154 (VLLM::EngineCor): ok in 0.06s
+[13:12:17]     cc checkpoint pid=5154 (VLLM::EngineCor): ok in 1.02s
+[13:12:17]   park took 1.41s  gpu now: 0, 0 MiB 1, 0 MiB   (sum 0 MiB)
+[13:12:17]   tree RSS parked: 6.51 GiB   (this is the floor on image size)
+[13:12:18]     pid=4836 (vllm) rss=1.38 GiB nvidia_fds=0 cc_state=checkpointed
+[13:12:18]     pid=5154 (VLLM::EngineCor) rss=5.13 GiB nvidia_fds=9 cc_state=checkpointed
+[13:12:18] step 3: criu dump the tree rooted at 4836
+[13:12:19]   criu dump rc=1 in 0.72s  image=1.10 GiB
+[13:12:19]   --- criu refused. error lines: ---
+      (00.698337) Error (criu/files-ext.c:94): Can't dump file 9 of that type [20666] (chr 195:255)
+      (00.698362) Error (criu/cr-dump.c:1681): Dump files (pid: 5154) failed with -1
+      (00.698841) Error (criu/cr-dump.c:2111): Dumping FAILED.
+[13:12:19]   dump failed -- that is this arm's result. cleaning up.
+[13:12:19]   tree still alive? yes   gpu=0, 0 MiB 1, 0 MiB 
+[reaper] reaped orphan 5154
+/criu/scripts/criu-vllm-probe.sh: line 233:  4836 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" "${SLEEP_FLAG[@]}" "${EXTRA_VLLM[@]+${EXTRA_VLLM[@]}}" < /dev/null > "$LOG" 2>&1
+[13:12:24]   gpu after cleanup: 0, 0 MiB 1, 0 MiB 
+
+=== SUMMARY arm=thin tp=1 ===================================
+boot to health_200 : 59.75s
+park               : 1.41s
+criu dump          : FAILED in 0.72s (see /criu/img/vllm-tp1-thin/dump.log)
+command terminated with exit code 3
+EXIT_CODE: 3

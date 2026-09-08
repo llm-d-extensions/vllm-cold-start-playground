@@ -1,0 +1,23 @@
+[reaper] subreaper armed, pid=70959
+[22:21:06] arm=restore tp=1  gpu=0, 0 MiB 1, 0 MiB 
+[22:21:06]   evicted 0.59 GiB
+[22:21:08]   criu restore rc=0 in 2.34s
+[22:21:56]   restore start -> health_200: 50.23s
+[22:21:57]   restore start -> completion: 51.04s   out: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+[22:21:57]   child log:
+    stage=torch took=1.03s cumulative=1.03s nvidia_fds=0 rss=0.50GiB threads=16
+    stage=vllm took=1.65s cumulative=2.67s nvidia_fds=0 rss=0.70GiB threads=17
+    stage=server took=3.58s cumulative=6.25s nvidia_fds=11 rss=0.95GiB threads=32
+    preload done cumulative=6.25s nvidia_fds=11 rss=0.95GiB
+    resumed after restore at 1788560468.991 nvidia_fds=11
+    exec vllm serve in-process: vllm serve --model Qwen/Qwen3-32B --max-model-len 8192 --tensor-parallel-size 1 --port 8400
+
+=== MEASURE arm=restore stage=server tp=1 ===============
+criu restore         : 2.34s
+restore -> health_200: 50.23s
+restore -> completion: 51.04s
+completion           : ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+image                : /criu/img/preboot-server (0.59 GiB)
+==========================================================
+[reaper] reaped orphan 67445
+[reaper] reaped orphan 71098

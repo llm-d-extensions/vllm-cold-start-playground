@@ -1,0 +1,21 @@
+[reaper] subreaper armed, pid=32483
+[14:12:28] building an import-warm image at stage=vllm
+[14:12:35]   preload ready pid=32498 in 3.02s (this cost is what the image removes)
+    start pid=32498 nvidia_fds=0 rss=0.01GiB
+    stage=torch took=1.00s cumulative=1.00s nvidia_fds=0 rss=0.50GiB threads=16
+    stage=vllm took=1.69s cumulative=2.69s nvidia_fds=0 rss=0.71GiB threads=17
+    preload done cumulative=2.69s nvidia_fds=0 rss=0.71GiB
+[14:12:35]   /dev/nvidia* fds: 0  (must be 0 for a dump with no cuda-checkpoint)
+/criu/scripts/criu-preboot.sh: line 202: 32498 Killed                  PREBOOT_STAGE="$STAGE" setsid python3 /tmp/preboot_child.py "$RDY" "$GO" "$ARGS" "$OUT" < /dev/null > "$LOG" 2>&1
+[14:12:38]   criu dump rc=0 in 3.02s  image=0.42 GiB
+          0.42 GiB  /criu/img/preboot-vllm/pages-1.img
+          0.00 GiB  /criu/img/preboot-vllm/dump.log
+          0.00 GiB  /criu/img/preboot-vllm/mm-32498.img
+          0.00 GiB  /criu/img/preboot-vllm/files.img
+
+=== BUILD SUMMARY stage=vllm ============================
+preload (imports)   : 3.02s
+criu dump           : 3.02s
+image size          : 0.42 GiB
+image dir           : /criu/img/preboot-vllm
+===========================================================

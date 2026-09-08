@@ -1,0 +1,68 @@
+[reaper] subreaper armed, pid=30186
+======================================================================
+criu-vllm-probe  arm=live tp=1 model=Qwen/Qwen3-32B max-model-len=8192
+criu Version: 4.1.1   cc Version 580.105.08.
+image dir: /criu/img/vllm-tp1-live   log: /tmp/criu-vllm-tp1-live.log
+gpu at start: 0, 0 MiB 1, 0 MiB 
+container mem limit: unknown
+======================================================================
+[14:06:21] step 1: cold boot (this is the number the restore has to beat)
+[14:07:22]   health_200 at 61.38s   gpu=0, 74653 MiB 1, 4 MiB 
+[14:07:23]   baseline completion: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+[14:07:23]   tree: 30228(vllm) 30527(python3) 30528(VLLM::EngineCor) 
+[14:07:23]   pids holding /dev/nvidia*: 30228 30528 
+[14:07:23]   tree RSS before park: 4.12 GiB
+[14:07:23] step 2: no park -- dumping a live CUDA process on purpose
+[14:07:23]   tree RSS parked: 4.12 GiB   (this is the floor on image size)
+[14:07:23]     pid=30228 (vllm) rss=1.38 GiB nvidia_fds=11 cc_state=running
+[14:07:23]     pid=30527 (python3) rss=0.01 GiB nvidia_fds=0 cc_state=Error getting process state for process ID 30527: "initialization error"
+[14:07:23]     pid=30528 (VLLM::EngineCor) rss=2.73 GiB nvidia_fds=38 cc_state=running
+[14:07:23] step 3: criu dump the tree rooted at 30228
+[reaper] reaped orphan 30527
+/criu/scripts/criu-vllm-probe.sh: line 198: 30228 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" "${SLEEP_FLAG[@]}" "${EXTRA_VLLM[@]+${EXTRA_VLLM[@]}}" < /dev/null > "$LOG" 2>&1
+[reaper] reaped orphan 30528
+[14:08:13]   criu dump rc=0 in 49.46s  image=76.02 GiB
+[14:08:13]   largest image files:
+         74.89 GiB  /criu/img/vllm-tp1-live/pages-13.img
+          1.02 GiB  /criu/img/vllm-tp1-live/pages-1.img
+          0.03 GiB  /criu/img/vllm-tp1-live/pages-7.img
+          0.03 GiB  /criu/img/vllm-tp1-live/pages-6.img
+          0.02 GiB  /criu/img/vllm-tp1-live/dump.log
+[14:08:13]   tree gone? yes   gpu=0, 0 MiB 1, 0 MiB 
+[14:08:13]   dump throughput: 1574 MB/s
+[14:08:13] step 4: restore with the image evicted from the page cache
+[14:09:39]   evicted 76.02 GiB from the page cache
+[14:10:16]   criu restore (cold) rc=0 in 37.61s
+[14:10:16]   restored root pid=30228 (was 30228)   gpu=0, 74653 MiB 1, 4 MiB 
+[14:10:16] step 6: readiness and correctness after restore
+[14:10:16]   restore start -> health_200: 37.69s
+[14:10:17]   restore start -> completion: 38.48s
+[14:10:17]   completion after restore: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+[14:10:17]   correctness: IDENTICAL
+[14:10:17] step 7: second restore of the same image, page cache warm
+[reaper] reaped orphan 30228
+[reaper] reaped orphan 30527
+[reaper] reaped orphan 30528
+[14:10:22]   criu restore (warm) rc=1 in 0.19s
+      (00.166620)  30528: Error (criu/files-reg.c:2258): Can't link dev/shm/link_remap.644 -> dev/shm/sem.NCBGyB: No such file or directory
+      (00.166622)  30528: Error (criu/mem.c:1424): `- Can't open vma
+      (00.168121)  30228: Error (criu/cr-restore.c:1258): 30528 exited, status=1
+      (00.168267) Error (criu/cr-restore.c:2320): Restoring FAILED.
+[reaper] reaped orphan 30527
+[reaper] reaped orphan 30228
+
+=== SUMMARY arm=live tp=1 ============================================
+boot to health_200        : 61.38s
+baseline completion       : ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+park (sleep+cuda-ckpt)    : 0   gpu after: 0 MiB
+tree RSS running / parked : 4.12 / 4.12 GiB
+criu dump                 : 49.46s for 76.02 GiB (1574 MB/s)
+criu restore (cache cold) : 37.61s
+criu restore (cache warm) : n/a
+cuda-checkpoint restore   : 0
+restore -> health_200     : 37.69s
+restore -> completion     : 38.48s
+correctness               : IDENTICAL
+after-restore completion  : ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+======================================================================
+EXIT: 0

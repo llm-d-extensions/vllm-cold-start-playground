@@ -1,0 +1,42 @@
+[reaper] subreaper armed, pid=27510
+======================================================================
+criu-vllm-probe  arm=live tp=2 model=Qwen/Qwen3-32B max-model-len=8192
+criu Version: 4.1.1   cc Version 580.105.08.
+image dir: /criu/img/vllm-tp2-live   log: /tmp/criu-vllm-tp2-live.log
+gpu at start: 0, 0 MiB 1, 0 MiB 
+container mem limit: unknown
+======================================================================
+[13:45:47] step 1: cold boot (this is the number the restore has to beat)
+[13:46:44]   health_200 at 57.34s   gpu=0, 78221 MiB 1, 78221 MiB 
+[13:46:45]   baseline completion: ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+[13:46:45]   tree: 27536(vllm) 27867(python3) 27868(VLLM::EngineCor) 28064(VLLM::Worker_TP) 28065(VLLM::Worker_TP) 
+[13:46:45]   pids holding /dev/nvidia*: 27536 27868 28064 28065 
+[13:46:45]   tree RSS before park: 8.97 GiB
+[13:46:45] step 2: no park -- dumping a live CUDA process on purpose
+[13:46:45]   tree RSS parked: 8.97 GiB   (this is the floor on image size)
+[13:46:45]     pid=27536 (vllm) rss=1.58 GiB nvidia_fds=22 cc_state=running
+[13:46:45]     pid=27867 (python3) rss=0.01 GiB nvidia_fds=0 cc_state=Error getting process state for process ID 27867: "initialization error"
+[13:46:45]     pid=27868 (VLLM::EngineCor) rss=1.25 GiB nvidia_fds=22 cc_state=running
+[13:46:45]     pid=28064 (VLLM::Worker_TP) rss=3.06 GiB nvidia_fds=38 cc_state=running
+[13:46:45]     pid=28065 (VLLM::Worker_TP) rss=3.07 GiB nvidia_fds=38 cc_state=running
+[13:46:45] step 3: criu dump the tree rooted at 27536
+[reaper] reaped orphan 29846
+[14:01:45]   criu dump rc=124 in 900.02s  image=0.00 GiB
+[14:01:45]   --- criu refused. error lines: ---
+      (00.236269) Error (cuda_plugin.c:222): cuda_plugin: Failed to launch cuda-checkpoint to retrieve restore tid: Could not find restore thread for process ID 27867
+      (00.708845) Error (cuda_plugin.c:222): cuda_plugin: Failed to launch cuda-checkpoint to retrieve restore tid: Could not find restore thread for process ID 27867
+[14:01:45]   dump failed -- that is this arm's result. cleaning up.
+[14:01:45]   tree still alive? yes   gpu=0, 78225 MiB 1, 78225 MiB 
+[reaper] reaped orphan 27868
+[reaper] reaped orphan 27867
+[reaper] reaped orphan 28065
+[reaper] reaped orphan 28064
+/criu/scripts/criu-vllm-probe.sh: line 238: 27536 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" "${SLEEP_FLAG[@]}" "${EXTRA_VLLM[@]+${EXTRA_VLLM[@]}}" < /dev/null > "$LOG" 2>&1
+[14:01:50]   gpu after cleanup: 0, 0 MiB 1, 0 MiB 
+
+=== SUMMARY arm=live tp=2 ===================================
+boot to health_200 : 57.34s
+park               : 0
+criu dump          : FAILED in 900.02s (see /criu/img/vllm-tp2-live/dump.log)
+command terminated with exit code 3
+EXIT_CODE=3

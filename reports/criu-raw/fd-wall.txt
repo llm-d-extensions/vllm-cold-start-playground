@@ -1,0 +1,66 @@
+The fd wall: why cuda-checkpoint is necessary but not sufficient for vLLM
+=========================================================================
+
+Measured, TP=1 Qwen3-32B (reports/criu-raw/vllm-tp1-ckpt.txt):
+
+  before park   pid 2753 (vllm)            nvidia_fds=11
+                pid 3062 (VLLM::EngineCor) nvidia_fds=44
+  cc checkpoint pid 2753  ok in  0.06s
+                pid 3062  ok in 22.60s
+  after park    gpu 0 MiB (both)              <- device memory really did move
+                tree RSS 3.95 -> 76.78 GiB    <- ...1:1 into host anon pages
+                pid 2753  nvidia_fds=0  state=checkpointed
+                pid 3062  nvidia_fds=9  state=checkpointed   <- NINE SURVIVED
+  criu dump     rc=1 in 0.73s
+    Error (criu/files-ext.c:94): Can't dump file 9 of that type [20666] (chr 195:255)
+    Error (criu/cr-dump.c:1681): Dump files (pid: 3062) failed with -1
+
+195:255 is /dev/nvidiactl. Contrast the small CUDA process in
+scripts/criu-matrix.sh, where the same cuda-checkpoint call took nvidia_fds to
+**0** and criu then dumped it happily. So this is specific to what a real engine
+has open, not to cuda-checkpoint.
+
+Three observations that pin the shape of it:
+
+1. It is not about image size. Arm `thin` (/sleep?level=2, which drops the
+   weights and leaves ~6.6 GiB rather than ~76 GiB) failed at 0.72s with the
+   identical error on the identical fd. A blocker that is a file descriptor does
+   not care how many bytes you removed.
+
+2. It is not about cuda-checkpoint failing. It succeeded on both pids, moved
+   every byte off the device, and reported state=checkpointed. The 22.60s it
+   spent on EngineCore is 73 GiB at ~2.4 GiB/s D2H -- exactly the rate the small
+   probe showed.
+
+3. The engine has the NVIDIA management library resident, not just the CUDA
+   runtime. criu's own -v4 log of the failed dump lists it among the mapped
+   files:
+
+     (00.133837) Dumping path for -3 fd via self 12
+                 [/usr/lib64/libnvidia-ml.so.580.105.08]
+
+   (Those "-3 fd" lines are mapped files rather than open descriptors, so this is
+   evidence about what is loaded, not direct attribution of the nine fds.)
+   cuda-checkpoint's remit is the CUDA context; an NVML handle -- which vLLM
+   acquires via pynvml for device queries and memory profiling -- is a separate
+   /dev/nvidiactl open that only the owning process can release, by calling
+   nvmlShutdown(). A dumper cannot do it on the process's behalf.
+
+THE ACTUAL CAUSE, though, is upstream of all of this
+----------------------------------------------------
+criu is supposed to handle these fds itself, via a plugin, and this criu has
+none. /usr/lib/criu/ is the only directory the binary searches and it is empty;
+the Ubuntu noble package builds no plugins at all. The generic hook the missing
+plugin would fill is the one that fired in the small-process `live` arm:
+
+    cr_plugin_handle_device_vma
+    Error (criu/proc_parse.c:116): handle_device_vma plugin failed
+
+criu 4.1.1's own source tree ships exactly that plugin --
+plugins/cuda/cuda_plugin.c -- which shells out to a `cuda-checkpoint` binary on
+$PATH and registers the handlers for the nvidia fds and device VMAs. Ubuntu just
+does not build it.
+
+So every "criu cannot dump CUDA" result above is a statement about THIS BUILD of
+criu, not about criu. That is why the next step was to build the plugin rather
+than to conclude.

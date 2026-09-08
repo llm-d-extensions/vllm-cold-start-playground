@@ -1,0 +1,43 @@
+[reaper] subreaper armed, pid=6908
+======================================================================
+criu-vllm-probe  arm=live tp=2 model=Qwen/Qwen3-32B max-model-len=8192
+criu Version: 4.1.1   cc Version 580.105.08.
+image dir: /criu/img/vllm-tp2-live   log: /tmp/criu-vllm-tp2-live.log
+gpu at start: 0, 0 MiB 1, 0 MiB 
+container mem limit: unknown
+======================================================================
+[13:13:03] step 1: cold boot (this is the number the restore has to beat)
+[13:14:04]   health_200 at 60.53s   gpu=0, 78221 MiB 1, 78221 MiB 
+[13:14:04]   baseline completion: ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+[13:14:04]   tree: 6945(vllm) 7291(python3) 7292(VLLM::EngineCor) 7498(VLLM::Worker_TP) 7499(VLLM::Worker_TP) 
+[13:14:04]   pids holding /dev/nvidia*: 6945 7292 7498 7499 
+[13:14:04]   tree RSS before park: 9.00 GiB
+[13:14:04] step 2: no park -- dumping a live CUDA process on purpose
+[13:14:04]   tree RSS parked: 9.00 GiB   (this is the floor on image size)
+[13:14:04]     pid=6945 (vllm) rss=1.58 GiB nvidia_fds=22 cc_state=running
+[13:14:05]     pid=7291 (python3) rss=0.01 GiB nvidia_fds=0 cc_state=Error getting process state for process ID 7291: "initialization error"
+[13:14:05]     pid=7292 (VLLM::EngineCor) rss=1.25 GiB nvidia_fds=22 cc_state=running
+[13:14:05]     pid=7498 (VLLM::Worker_TP) rss=3.08 GiB nvidia_fds=38 cc_state=running
+[13:14:05]     pid=7499 (VLLM::Worker_TP) rss=3.08 GiB nvidia_fds=38 cc_state=running
+[13:14:05] step 3: criu dump the tree rooted at 6945
+[13:14:05]   criu dump rc=1 in 0.15s  image=0.00 GiB
+[13:14:05]   --- criu refused. error lines: ---
+      (00.131894) Error (criu/proc_parse.c:116): handle_device_vma plugin failed: No such file or directory
+      (00.131895) Error (criu/proc_parse.c:632): Can't handle non-regular mapping on 6945's map 7f158d656000
+      (00.131901) Error (criu/cr-dump.c:1570): Collect mappings (pid: 6945) failed with -1
+      (00.132733) Error (criu/cr-dump.c:2111): Dumping FAILED.
+[13:14:05]   dump failed -- that is this arm's result. cleaning up.
+[13:14:05]   tree still alive? yes   gpu=0, 78221 MiB 1, 78221 MiB 
+[reaper] reaped orphan 7291
+[reaper] reaped orphan 7292
+[reaper] reaped orphan 7498
+[reaper] reaped orphan 7499
+/criu/scripts/criu-vllm-probe.sh: line 233:  6945 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" "${SLEEP_FLAG[@]}" "${EXTRA_VLLM[@]+${EXTRA_VLLM[@]}}" < /dev/null > "$LOG" 2>&1
+[13:14:10]   gpu after cleanup: 0, 0 MiB 1, 0 MiB 
+
+=== SUMMARY arm=live tp=2 ===================================
+boot to health_200 : 60.53s
+park               : 0
+criu dump          : FAILED in 0.15s (see /criu/img/vllm-tp2-live/dump.log)
+command terminated with exit code 3
+EXIT_CODE: 3

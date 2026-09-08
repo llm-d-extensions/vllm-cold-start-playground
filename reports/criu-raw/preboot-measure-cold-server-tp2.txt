@@ -1,0 +1,15 @@
+[reaper] subreaper armed, pid=76283
+[22:25:09] arm=cold tp=2  gpu=0, 0 MiB 1, 0 MiB 
+[22:26:04]   cold boot -> health_200: 55.37s
+[22:26:05]   cold boot -> completion: 55.85s   out: ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+
+=== MEASURE arm=cold tp=2 ==============================
+exec -> health_200   : 55.37s
+exec -> completion   : 55.85s
+completion           : ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+==========================================================
+[reaper] reaped orphan 76636
+[reaper] reaped orphan 76637
+[reaper] reaped orphan 76824
+[reaper] reaped orphan 76825
+/criu/scripts/criu-preboot.sh: line 99: 76302 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" < /dev/null > "$LOG" 2>&1

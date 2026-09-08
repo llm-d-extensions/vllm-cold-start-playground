@@ -1,0 +1,190 @@
+CRIU experiment environment -- captured 2026-09-04
+==================================================
+
+Pod          : vllm-coldstart, ns lionel-cold-start, manifests/pod-exec-criu.yaml
+Node         : pokprod-b93r39s1  (2.0 TiB RAM, 224 cores)
+GPUs         : 2 x H100-80GB-HBM3
+Container    : cpu 16, memory 384Gi, privileged, seccomp Unconfined
+               CapEff 000001ffffffffff, Seccomp: 0
+Image        : vllm/vllm-openai:latest, torch 2.13.0+cu130
+Kernel       : 5.14.0-570.64.1.el9_6.x86_64  (RHEL 9.6 host, Ubuntu 24.04 container)
+criu         : 4.1.1-1build1 (Ubuntu noble pool)   [4.2 rejected: needs libnet9]
+cuda-ckpt    : 580.105.08
+
+criu plugin situation
+---------------------
+/usr/lib/criu/ is the only directory the criu binary searches for plugins, and on
+this install it is EMPTY -- the Ubuntu criu package ships an amdgpu plugin man
+page and no plugin .so at all:
+
+    $ ls /usr/lib/x86_64-linux-gnu/criu/ /usr/lib/criu/
+    /usr/share/man/man1/criu-amdgpu-plugin.1.gz
+
+    $ strings /criu/bin/criu | grep -i cuda
+    (nothing)
+
+So this criu has no NVIDIA device support of its own, by any route. The only
+symbol in the area is the generic hook the missing plugin would have filled:
+
+    cr_plugin_handle_device_vma
+    Error (%s:%d): handle_device_vma plugin failed: %s
+
+This matters for reading the `live` arms below: their failure is structural, not
+a flag or permissions problem.
+
+criu self-test
+--------------
+`criu check --all` exits 1 on an unstable self-test ("unmatched dev:ino", tied to
+"Can't keep kdat cache on non-tempfs" -- /criu is not tmpfs). It did NOT prevent
+any real dump or restore in these experiments; every dump below either succeeded
+or failed for a reason criu named explicitly.
+
+/criu image store throughput (O_DIRECT, 8 GiB, measured)
+--------------------------------------------------------
+    device : /dev/nvme0n1p4, 1.8T, 1.3T free
+    write  :   649 MB/s
+    read   :  3900 MB/s
+
+Read the dump/restore numbers against these. In particular criu writes its image
+through the page cache, so a dump that reports better than 649 MB/s has not
+reached the device yet -- the writeback is deferred, and only the sustained
+figure can be used to extrapolate to a large image.
+
+Baseline cold starts (scripts/coldstart-run.sh, 3 repeats each, registry-WARM)
+-----------------------------------------------------------------------------
+    TP=1 : 92.7s / 58.0s / 57.8s     median 58.0s   (r1 is a page-cache outlier:
+                                     weight load 56.8s vs ~30.0s in r2/r3)
+    TP=2 : 55.0s / 55.0s / 57.7s     median 55.0s
+
+  TP=1 median phase mix : imports 9.36s (16.1%), weight load 30.0s (51.8%),
+                          cudagraph capture 10.6s (18.3%), warmup 3.58s
+  TP=2 median phase mix : imports 22.6s (41.0%), weight load 13.5s (24.5%),
+                          cudagraph capture 8.50s (15.4%), kv alloc 3.23s
+
+  All six runs report "registry cache: present at t0 -- registry-warm", so the
+  ~15s modelinfos-inspection cost documented in docs/measurement.md is NOT in any
+  of these numbers, and they are comparable to each other but not to a
+  cold-registry baseline.
+
+  The probe scripts below print their own boot-to-health_200 using the same
+  external poller they use for a restore, so within a probe transcript the boot
+  and restore numbers are directly comparable. Those in-script boot numbers run a
+  little higher than the harness medians (e.g. 67.11s at TP=1) because the poller
+  starts before the `vllm` CLI execs rather than at engine t0.
+
+UPDATE 13:16 -- the plugin was BUILT, so everything above about "no NVIDIA
+support" describes the Ubuntu package, not criu
+-----------------------------------------------------------------------------
+criu 4.1.1's own source ships plugins/cuda/cuda_plugin.c. Built from the matching
+4.1.1 source in-pod:
+
+    extra build deps : libprotobuf-dev, uuid-dev
+                       (top-level make first failed on
+                        images/google/protobuf/descriptor.proto -- needs
+                        libprotobuf-dev, NOT just libprotobuf-c-dev -- and then
+                        on -luuid)
+    compile flags     : NONE relaxed, no -Werror suppression
+    installed         : /usr/lib/criu/cuda_plugin.so, 49768 bytes, mode 755
+    copy kept         : /criu/cuda_plugin.so
+    /usr/sbin/criu    : NOT replaced, still 4.1.1-1build1
+    ABI check         : plugin's undefined symbols (fi_strategy, opts,
+                        add_inventory_plugin, compel_wait_task, ...) all present
+                        in `nm -D /usr/sbin/criu`
+    cuda-checkpoint   : /usr/local/bin/cuda-checkpoint (the plugin resolves the
+                        name via $PATH at dump time)
+
+A later `lib/pycriu` build failure (missing C++ protoc) is irrelevant: it happens
+after plugins/cuda/cuda_plugin.so is already produced.
+
+`criu check` CANNOT confirm the plugin loads. cr_plugin_init() runs only from the
+dump/pre-dump/restore stages, so "Looks good." is printed with an empty plugin
+directory and with a working plugin alike. Only a real dump proves it.
+
+A TRAP THAT COST ONE 32B BOOT: do not call the variable CC
+----------------------------------------------------------
+The probe scripts originally read the cuda-checkpoint path from $CC. Passing it
+on the exec line -- `CC=/usr/local/bin/cuda-checkpoint kubectl exec ...` -- puts
+it in the ENVIRONMENT of everything below, and CC is the C-compiler variable.
+FlashInfer/Inductor's JIT then invoked cuda-checkpoint as a compiler:
+
+    /usr/local/bin/cuda-checkpoint: invalid option -- 'O'
+    Invalid option(s) or option(s) not supported by this CUDA Driver
+
+and the boot died 50s later inside profile_run -> _dummy_run -> execute_model
+with "Engine core initialization failed", which looks nothing like the actual
+cause. The variable is now CUDA_CKPT in all four criu scripts, defaulting to
+/tmp/cuda-checkpoint.
+
+Not a confound for the plugin/noplug matrix arms (reports/criu-raw/matrix-plugin.txt),
+which did run with CC set: that child only imports torch, allocates two tensors
+and captures one CUDA graph. No C compilation happens on that path, and the arm
+completed with VERDICT: IDENTICAL.
+
+------------------------------------------------------------------------------
+LATE INCIDENTS (2026-09-04, after the plugin build)
+------------------------------------------------------------------------------
+1. preboot_child.py had no `if __name__ == "__main__"` guard. A criu-restored
+   process has CUDA initialised, so vLLM force-overrides fork -> spawn
+   (system_utils.py:157), spawn re-imports __main__, and the spawned EngineCore
+   re-ran the preload instead of becoming EngineCore. TP=2 restore wedged in
+   do_poll with 37 threads until the 900s poller gave up; GPUs never left 4 MiB.
+   TP=1 was unaffected because UniProcExecutor forks. Guard added to
+   scripts/criu-preboot.sh; image rebuilt (build B); TP=2 then reached health in
+   54.70s. The wedged tree was killed with kill -9, which is the likely source of
+   the NVRM NV_ERR_OBJECT_NOT_FOUND / "channel not found" burst in dmesg around
+   14:16-14:31 UTC -- an unclean CUDA teardown, not a new fault.
+
+2. --link-remap was made opt-out in scripts/criu-vllm-probe.sh and the TP=1 spawn
+   arm re-run to test whether the single-use image was self-inflicted. It is not:
+   criu refuses the dump outright without it
+     Error (criu/files-reg.c:1122): Can't create link remap for /dev/shm/sem.7R6Tks.
+                                    Use link-remap option.
+   so for a warmed vLLM engine the flag is mandatory and the resulting image is
+   necessarily not self-contained. Default left at opt-out; set LINK_REMAP=1 to
+   dump a warmed engine.
+
+3. cuda_plugin.c:222 ("Could not find restore thread for process ID N") was
+   observed NON-fatally in that run against the CUDA-less python3 intermediate in
+   the tree, while the dump continued 33s more. Treat it as benign noise for a
+   process with no CUDA state, not a plugin-health signal.
+
+--- --stage server ARMS (2026-09-04, 22:14-22:27 UTC) -----------------------
+Same pod, same criu 4.1.1 + self-built cuda_plugin.so, 0 restarts throughout.
+Six arms run interleaved (restore, cold, restore, cold, restore, cold) so no
+cold control is separated from its restore by more than ~4 minutes:
+
+  22:14:50  build --stage server        dump rc=0, 3.63s, 0.59 GiB
+  22:15:21  measure restore tp=1        health 51.06s  (criu restore 2.27s)
+  22:19:17  measure cold    tp=1        health 55.24s
+  22:21:08  measure restore tp=1  (r2)  health 50.23s  (criu restore 2.34s)
+  22:23:16  measure cold    tp=1  (r2)  health 54.19s
+  22:24:46  measure restore tp=2        health 52.81s  (criu restore 2.31s)
+  22:26:04  measure cold    tp=2        health 55.37s
+
+All three restores came from ONE dump with no rebuild between them, including the
+TP=2 one -- so the image is reusable and topology-agnostic. GPUs read 0 MiB
+between every arm. No `Error (` line in any restore.log.
+
+Two notes on why this image is portable where the full-engine image is not:
+  * dump.log contains "Will allow link remaps on FS" (the enablement line) and
+    NO deleted/unlinked file lines -- --link-remap was passed but never used.
+  * filesizes.txt lists only /tmp/preboot.log and /tmp/preboot.out, two ordinary
+    log files the measure arm recreates. That is the whole out-of-image
+    dependency.
+
+A comment correction in scripts/criu-preboot.sh: stage=server was documented as
+importing nothing "that would touch the device". False. Importing the four
+modules individually (same pod, 22:27 UTC):
+    vllm.entrypoints.openai.api_server      +3.50s   nvidia_fds 0 -> 11
+    vllm.entrypoints.cli.main               +0.00s   nvidia_fds 11
+    vllm.engine.arg_utils.AsyncEngineArgs   +0.00s   nvidia_fds 11
+    uvicorn, fastapi                        +0.00s   nvidia_fds 11
+One import is the whole cost and the whole device contact; the other three are
+already resident via it.
+
+Cross-session drift worth recording, because it invalidated an earlier claim:
+TP=1 cold, unchanged configuration, was 57.13s in the --stage vllm session and
+55.24s / 54.19s here -- 2.41s apart. The --stage vllm win was reported as
+2.33-3.63s against that single 57.13s control; its own arithmetic bound is 0.80s
+(2.67s carried minus 1.87s restore). The --stage server arm's bound is 3.94s and
+it measured 4.07s. Same-session controls with repeats are the difference.

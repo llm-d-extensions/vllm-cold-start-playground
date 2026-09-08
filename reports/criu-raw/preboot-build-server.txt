@@ -1,0 +1,22 @@
+[reaper] subreaper armed, pid=67430
+[22:14:39] building an import-warm image at stage=server
+[22:14:50]   preload ready pid=67445 in 6.53s (this cost is what the image removes)
+    start pid=67445 nvidia_fds=0 rss=0.01GiB
+    stage=torch took=1.03s cumulative=1.03s nvidia_fds=0 rss=0.50GiB threads=16
+    stage=vllm took=1.65s cumulative=2.67s nvidia_fds=0 rss=0.70GiB threads=17
+    stage=server took=3.58s cumulative=6.25s nvidia_fds=11 rss=0.95GiB threads=32
+    preload done cumulative=6.25s nvidia_fds=11 rss=0.95GiB
+[22:14:50]   /dev/nvidia* fds: 11  (must be 0 for a dump with no cuda-checkpoint)
+/criu/scripts/criu-preboot.sh: line 235: 67445 Killed                  PREBOOT_STAGE="$STAGE" setsid python3 /tmp/preboot_child.py "$RDY" "$GO" "$ARGS" "$OUT" < /dev/null > "$LOG" 2>&1
+[22:14:53]   criu dump rc=0 in 3.63s  image=0.59 GiB
+          0.59 GiB  /criu/img/preboot-server/pages-1.img
+          0.00 GiB  /criu/img/preboot-server/dump.log
+          0.00 GiB  /criu/img/preboot-server/mm-67445.img
+          0.00 GiB  /criu/img/preboot-server/files.img
+
+=== BUILD SUMMARY stage=server ============================
+preload (imports)   : 6.53s
+criu dump           : 3.63s
+image size          : 0.59 GiB
+image dir           : /criu/img/preboot-server
+===========================================================

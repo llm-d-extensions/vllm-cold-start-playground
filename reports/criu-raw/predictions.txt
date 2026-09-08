@@ -1,0 +1,22 @@
+measured constants
+  cuda-checkpoint D2H        : 2.44 GiB/s
+  cuda-checkpoint H2D        : 2.29 GiB/s
+  image bytes per device GiB : 1.13x
+  /criu sustained write      : 0.60 GiB/s
+  /criu sustained read       : 3.63 GiB/s
+
+TP=1: device footprint 73 GiB  ->  image ~83 GiB
+  BUILD (off critical path) : cc checkpoint 30s + criu dump 137s = 167s
+  RESTORE (critical path)   : criu read 23s + cc restore 32s = 55s
+  vs cold boot              : 67s   ->  WIN by 13s
+
+TP=2: device footprint 146 GiB  ->  image ~165 GiB
+  BUILD (off critical path) : cc checkpoint 60s + criu dump 273s = 333s
+  RESTORE (critical path)   : criu read 46s + cc restore 64s = 109s
+  vs cold boot              : 55s   ->  LOSS by 54s
+
+Why this is the ceiling, not a tuning problem:
+  A full-engine park replaces 'read ~62 GiB of safetensors, copy H2D' with
+  'read ~83 GiB of criu image, copy H2D'. Both legs got bigger. The only
+  lever that changes the shape is making the image SMALLER than the weights,
+  which is what sleep level 2 does -- by discarding the weights.

@@ -1,0 +1,41 @@
+total 52
+-rw-r--r--. 1 501 staff 10041 Sep  4 12:59 criu-matrix.sh
+-rw-r--r--. 1 501 staff 12915 Sep  4 12:59 criu-preboot.sh
+-rw-r--r--. 1 501 staff  3009 Sep  4 12:59 criu-reaper.py
+-rw-r--r--. 1 501 staff 17763 Sep  4 12:59 criu-vllm-probe.sh
+======================================================================
+[reaper] subreaper armed, pid=483
+criu-vllm-probe  arm=live tp=1 model=Qwen/Qwen3-32B max-model-len=8192
+criu Version: 4.1.1   cc Version 580.105.08.
+image dir: /criu/img/vllm-tp1-live   log: /tmp/criu-vllm-tp1-live.log
+gpu at start: 0, 0 MiB 1, 0 MiB 
+container mem limit: unknown
+======================================================================
+[13:05:41] step 1: cold boot (this is the number the restore has to beat)
+[13:06:48]   health_200 at 67.11s   gpu=0, 74653 MiB 1, 4 MiB 
+[13:06:49]   baseline completion: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+[13:06:49]   tree: 509(vllm) 1055(VLLM::EngineCor) 
+[13:06:49]   pids holding /dev/nvidia*: 509 1055 
+[13:06:49]   tree RSS before park: 1.42 GiB
+[13:06:49] step 2: no park -- dumping a live CUDA process on purpose
+[13:06:49]   tree RSS parked: 1.42 GiB   (this is the floor on image size)
+[13:06:49]     pid=509 (vllm) rss=1.42 GiB nvidia_fds=11 cc_state=running
+[13:06:49]     pid=1055 (VLLM::EngineCor) rss=2.64 GiB nvidia_fds=44 cc_state=running
+[13:06:49] step 3: criu dump the tree rooted at 509
+[13:06:49]   criu dump rc=1 in 0.18s  image=0.00 GiB
+[13:06:49]   --- criu refused. error lines: ---
+      (00.103620) Warn  (criu/kerndat.c:1285): Can't keep kdat cache on non-tempfs
+      (00.164373) Error (criu/files-ext.c:94): Can't dump file 9 of that type [20666] (chr 195:255)
+      (00.164392) Error (criu/cr-dump.c:1681): Dump files (pid: 509) failed with -1
+      (00.164877) Error (criu/cr-dump.c:2111): Dumping FAILED.
+[13:06:49]   dump failed -- that is this arm's result. cleaning up.
+/criu/scripts/criu-vllm-probe.sh: line 233:   509 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" "${SLEEP_FLAG[@]}" "${EXTRA_VLLM[@]+${EXTRA_VLLM[@]}}" < /dev/null > "$LOG" 2>&1
+[13:06:49]   tree still alive? yes   gpu=0, 74653 MiB 1, 4 MiB 
+[reaper] reaped orphan 1055
+[13:06:54]   gpu after cleanup: 0, 0 MiB 1, 0 MiB 
+
+=== SUMMARY arm=live tp=1 ===================================
+boot to health_200 : 67.11s
+park               : 0
+criu dump          : FAILED in 0.18s (see /criu/img/vllm-tp1-live/dump.log)
+command terminated with exit code 3

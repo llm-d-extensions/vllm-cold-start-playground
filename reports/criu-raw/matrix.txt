@@ -1,0 +1,61 @@
+-rwxr-xr-x. 1 501 root 5976 Sep  4 12:43 /tmp/cuda-checkpoint
+[reaper] subreaper armed, pid=3892
+==================================================================
+CRIU x cuda-checkpoint matrix
+criu    : Version: 4.1.1
+cc      : Version 580.105.08.
+torch   : 2.13.0+cu130
+kernel  : 5.14.0-570.64.1.el9_6.x86_64
+caps    : 000001ffffffffff  seccomp=0
+gpu     : 0 MiB 0 MiB 
+arms    : live ckpt noc
+==================================================================
+
+[13:00:27] ################ arm: live
+[13:00:29]   child pid=3936  rss=0.66 GiB  gpu=2773 MiB 4 MiB 
+[13:00:29]   /dev/nvidia* fds=36  nvidia maps=120
+[13:00:29]   cuda state=running
+[13:00:29]     criu dump rc=1 in 0.12s  image=0.00 GiB (134875 B)
+[13:00:29]     --- why it failed (criu log, error lines) ---
+      (00.107674) Error (criu/proc_parse.c:116): handle_device_vma plugin failed: No such file or directory
+      (00.107676) Error (criu/proc_parse.c:632): Can't handle non-regular mapping on 3936's map 200600000
+      (00.107682) Error (criu/cr-dump.c:1570): Collect mappings (pid: 3936) failed with -1
+      (00.107788) Error (criu/cr-dump.c:2111): Dumping FAILED.
+[13:00:29]   child alive after dump attempt? yes
+[reaper] reaped orphan 3936
+
+[13:00:31] ################ arm: ckpt
+[13:00:33]   child pid=4011  rss=0.66 GiB  gpu=2773 MiB 4 MiB 
+[13:00:33]     cuda-checkpoint lock: ok in 0.06s
+[13:00:34]     cuda-checkpoint checkpoint: ok in 1.11s
+[13:00:35]   after checkpoint: state=checkpointed rss=3.30 GiB gpu=0 MiB 0 MiB 
+[13:00:35]   /dev/nvidia* fds=0  restore-tid=4031
+[reaper] reaped orphan 4011
+[13:00:37]     criu dump rc=0 in 1.73s  image=3.07 GiB (3295616001 B)
+[13:00:37]   process gone after dump? yes  gpu=0 MiB 0 MiB 
+[13:00:38]     criu restore rc=0 in 1.34s
+[13:00:39]   restored pid=4011 (same pid? yes)  state=checkpointed
+[13:00:40]     cuda-checkpoint restore: ok in 1.18s
+[13:00:40]     cuda-checkpoint unlock: ok in 0.06s
+[13:00:40]   after cuda restore: gpu=2773 MiB 4 MiB  rss=0.46 GiB
+[reaper] reaped orphan 4011
+[13:00:41]   child output:
+      pre=3.0 cuda=True pid=4011 torch=2.13.0+cu130
+      post=3.0 (expect 3.0)
+      VERDICT: IDENTICAL
+
+[13:00:43] ################ arm: noc
+[13:00:44]   child pid=4158  rss=0.50 GiB  gpu=0 MiB 0 MiB   (torch imported, CUDA untouched)
+[reaper] reaped orphan 4158
+[13:00:44]     criu dump rc=0 in 0.28s  image=0.29 GiB (306430134 B)
+[13:00:45]     criu restore rc=0 in 0.21s
+[reaper] reaped orphan 4158
+[13:00:46]   child output:
+      pre=4.0 cuda=False pid=4158 torch=2.13.0+cu130
+      post=4.0 (expect 4.0)
+      VERDICT: IDENTICAL
+
+[13:00:48] done. gpu=0 MiB 0 MiB   images under /criu/img:
+  3.1G	/criu/img/ckpt
+  140K	/criu/img/live
+  293M	/criu/img/noc

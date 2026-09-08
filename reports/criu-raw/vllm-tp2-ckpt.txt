@@ -1,0 +1,49 @@
+[reaper] subreaper armed, pid=11936
+======================================================================
+criu-vllm-probe  arm=ckpt tp=2 model=Qwen/Qwen3-32B max-model-len=8192
+criu Version: 4.1.1   cc Version 580.105.08.
+image dir: /criu/img/vllm-tp2-ckpt   log: /tmp/criu-vllm-tp2-ckpt.log
+gpu at start: 0, 0 MiB 1, 0 MiB 
+container mem limit: unknown
+======================================================================
+[13:14:53] step 1: cold boot (this is the number the restore has to beat)
+[13:15:50]   health_200 at 56.20s   gpu=0, 78221 MiB 1, 78221 MiB 
+[13:15:50]   baseline completion: ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+[13:15:50]   tree: 11970(vllm) 12314(python3) 12315(VLLM::EngineCor) 12553(VLLM::Worker_TP) 12554(VLLM::Worker_TP) 
+[13:15:50]   pids holding /dev/nvidia*: 11970 12315 12553 12554 
+[13:15:50]   tree RSS before park: 8.94 GiB
+[13:15:50] step 2: cuda-checkpoint every CUDA-holding pid
+[13:15:50]     cc lock pid=11970 (vllm): ok in 0.05s
+[13:15:50]     cc checkpoint pid=11970 (vllm): ok in 0.09s
+[13:15:50]     cc lock pid=12315 (VLLM::EngineCor): ok in 0.05s
+[13:15:50]     cc checkpoint pid=12315 (VLLM::EngineCor): ok in 0.09s
+[13:15:51]     cc lock pid=12553 (VLLM::Worker_TP): ok in 0.05s
+[13:17:51]     cc checkpoint pid=12553 (VLLM::Worker_TP): HUNG (>120s) -- wchan=do_poll.constprop.0
+[13:17:51]     cc lock pid=12554 (VLLM::Worker_TP): ok in 0.05s
+[13:19:51]     cc checkpoint pid=12554 (VLLM::Worker_TP): HUNG (>120s) -- wchan=do_poll.constprop.0
+[13:19:51]   park took 240.61s  gpu now: 0, 78229 MiB 1, 78229 MiB   (sum 156458 MiB)
+[13:19:51]   tree RSS parked: 167.68 GiB   (this is the floor on image size)
+[13:19:51]     pid=11970 (vllm) rss=1.56 GiB nvidia_fds=0 cc_state=checkpointed
+[13:19:51]     pid=12314 (python3) rss=0.01 GiB nvidia_fds=0 cc_state=Error getting process state for process ID 12314: "initialization error"
+[13:19:51]     pid=12315 (VLLM::EngineCor) rss=1.26 GiB nvidia_fds=0 cc_state=checkpointed
+[13:31:44]     pid=12553 (VLLM::Worker_TP) rss=82.42 GiB nvidia_fds=11 cc_state=Error getting process state for process ID 12553: "OS call failed or operation not supported on this OS"
+[reaper] reaped orphan 12554
+[reaper] reaped orphan 12314
+[reaper] reaped orphan 12553
+[13:31:45]     pid=12554 (VLLM::Worker_TP) rss= GiB nvidia_fds=0 cc_state=Error getting process state for process ID 12554: "OS call failed or operation not supported on this OS"
+[13:31:45] step 3: criu dump the tree rooted at 11970
+[13:31:46]   criu dump rc=1 in 0.40s  image=0.00 GiB
+[13:31:46]   --- criu refused. error lines: ---
+      (00.387104) Error (cuda_plugin.c:222): cuda_plugin: Failed to launch cuda-checkpoint to retrieve restore tid: Could not find restore thread for process ID 11970
+      (00.387197) Error (compel/src/lib/infect.c:418): Unable to detach from 11970: No such process
+      (00.387206) Error (criu/cr-dump.c:2111): Dumping FAILED.
+[13:31:46]   dump failed -- that is this arm's result. cleaning up.
+[13:31:46]   tree still alive? no   gpu=0, 0 MiB 1, 0 MiB 
+[13:31:51]   gpu after cleanup: 0, 0 MiB 1, 0 MiB 
+
+=== SUMMARY arm=ckpt tp=2 ===================================
+boot to health_200 : 56.20s
+park               : 240.61s
+criu dump          : FAILED in 0.40s (see /criu/img/vllm-tp2-ckpt/dump.log)
+command terminated with exit code 3
+EXIT_CODE: 3

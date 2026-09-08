@@ -1,0 +1,12 @@
+[reaper] subreaper armed, pid=69167
+[22:19:17] arm=cold tp=1  gpu=0, 0 MiB 1, 0 MiB 
+[22:20:12]   cold boot -> health_200: 55.24s
+[22:20:13]   cold boot -> completion: 56.05s   out: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+
+=== MEASURE arm=cold tp=1 ==============================
+exec -> health_200   : 55.24s
+exec -> completion   : 56.05s
+completion           : ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+==========================================================
+/criu/scripts/criu-preboot.sh: line 99: 69186 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" < /dev/null > "$LOG" 2>&1
+[reaper] reaped orphan 69534

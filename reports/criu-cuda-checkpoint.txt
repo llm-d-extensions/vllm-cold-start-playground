@@ -1,0 +1,825 @@
+==============================================================================
+CRIU x cuda-checkpoint: what checkpoint/restore can and cannot do for vLLM
+cold start, at TP=1 and TP=2
+==============================================================================
+pod          : vllm-coldstart (manifests/pod-exec-criu.yaml) -- privileged,
+               seccomp Unconfined, CapEff 000001ffffffffff, memory 384Gi
+node         : pokprod-b93r39s1, 2.0 TiB RAM, 224 cores, 2 x H100-80GB-HBM3
+model        : Qwen/Qwen3-32B, 61.02 GiB, 17 safetensors shards
+stack        : vLLM 0.28.0 / torch 2.13.0+cu130 / CUDA 13.0
+kernel       : 5.14.0-570.64.1.el9_6.x86_64 (RHEL 9.6 host, Ubuntu 24.04 ctr)
+criu         : 4.1.1-1build1  + cuda_plugin.so BUILT FROM SOURCE (see below)
+cuda-ckpt    : 580.105.08, /usr/local/bin/cuda-checkpoint
+image store  : /criu emptyDir on /dev/nvme0n1p4 -- 649 MB/s write, 3900 MB/s read
+baselines    : TP=1 median 58.0s, TP=2 median 55.0s (registry-warm, 3 repeats)
+
+The question this answers: does CRIU checkpoint/restore -- with and without
+NVIDIA's cuda-checkpoint -- make a vLLM replica start faster? Run the baseline
+first, then decide which form of the optimization is worth measuring, then
+measure it.
+
+The short version, in five parts:
+
+  1. "With vs without cuda-checkpoint" is not a tuning question with two
+     comparable answers. Without it criu cannot serialize a CUDA process at all
+     -- the dump is refused in ~0.12s. With it (plus criu's CUDA plugin, which
+     Ubuntu does not ship and which had to be built from source) criu round-trips
+     one correctly, byte-identical, and completely unattended.
+  2. At TP=1 a full-engine checkpoint DOES beat a cold boot: restore to
+     health_200 in 37.7s against a 58.0s baseline median. ~20s, 35%.
+  3. It only works with VLLM_WORKER_MULTIPROC_METHOD=spawn -- which is exactly
+     the setting this repo turns off to save 15.5s of re-imports on ordinary
+     boots. Fork and CRIU are mutually exclusive. That trade-off, not the 20s, is
+     the finding worth carrying elsewhere.
+  4. At TP=2 the route is not slow, it is closed: cuda-checkpoint itself hangs on
+     the processes holding NCCL communicators, and nothing downstream gets a
+     chance to be measured.
+  5. The version of this that is actually worth adopting is much smaller and is
+     not a full-engine checkpoint at all: dump a process that has finished the
+     stack's IMPORTS but never built an engine. 0.59 GiB, 4.07s off TP=1 (7.4%)
+     and 2.56s off TP=2, and unlike item 2 the image is reusable and topology-
+     agnostic -- one dump served three restores at two different TP values. Its
+     win equals (imports carried) minus (restore cost) and is already at that
+     bound, so 4s is the ceiling, not a starting point. It still needs the plugin
+     and a privileged pod, because the single import that earns the 4s
+     (vllm.entrypoints.openai.api_server, 3.5s) is also the one that opens 11
+     /dev/nvidia* fds -- the prize and the price are the same import.
+
+And one caveat that outranks item 2. Dumping a warmed engine REQUIRES criu's
+--link-remap (without it criu refuses outright: "Can't create link remap for
+/dev/shm/sem.7R6Tks. Use link-remap option."), and --link-remap produces an image
+that depends on /dev/shm state left behind by the dump -- so a second restore of
+the same image fails, and a fresh replica would fail the same way. Those two
+properties cannot be separated by any flag setting, which closes off "build one
+image, restore it on many replicas" for the full-engine route as it stands.
+
+A last thing, which is method rather than result but changed three conclusions in
+this report: two of the failures here initially looked like platform limits and
+were not. One was a missing plugin in a distro package; one was a missing
+`if __name__ == "__main__"` guard in my own harness. Both produced errors that
+pointed confidently at criu. The third is the reverse failure -- not a limit that
+was not real, but a WIN that was not real: an early import-warm result of 2.3-3.6s
+turned out to be mostly a slow cold control, caught only when a later session's
+own controls came in 2.4s faster on an unchanged configuration and the arithmetic
+refused to close. Every number below that is not backed by a same-session control
+and its own accounting should be read with that in mind.
+
+------------------------------------------------------------------------------
+A CORRECTION TO THE PREMISE: THE FIRST FIVE ARMS TESTED AN INCOMPLETE BUILD
+------------------------------------------------------------------------------
+Every "criu cannot do this" result in the first pass came from a criu with no
+CUDA plugin installed, and that is a fact about the package, not about criu:
+
+    $ ls /usr/lib/criu/          # the ONLY dir the binary searches
+    (empty -- Ubuntu's criu package ships an amdgpu plugin MAN PAGE and no .so)
+    $ strings /usr/sbin/criu | grep -i cuda
+    (nothing)
+
+criu 4.1.1's own source tree ships plugins/cuda/cuda_plugin.c, which shells out
+to a `cuda-checkpoint` binary found on $PATH. It is simply not built by the
+distro package. So it was built here from the matching 4.1.1 source, needing
+libprotobuf-dev and uuid-dev beyond the existing deps, with NO compile flags
+relaxed, and installed as /usr/lib/criu/cuda_plugin.so (49,768 bytes, mode 755).
+ABI compatibility was verified by cross-checking the plugin's undefined symbols
+(fi_strategy, opts, add_inventory_plugin, compel_wait_task, ...) against the
+installed binary's exports; /usr/sbin/criu was never replaced.
+
+One trap worth recording, because it makes a plugin problem look like a criu
+limitation: `criu check` cannot tell you whether the plugin loads. cr_plugin_init()
+runs only from the dump/pre-dump/restore stages, so `criu check --all` says
+"Looks good." with an empty plugin directory and with a working plugin alike.
+The only proof is a real dump.
+
+Consequence for reading this report: the arms are dated. Anything from before the
+plugin existed is labelled PRE-PLUGIN and is evidence about the Ubuntu package,
+not about what criu can do.
+
+------------------------------------------------------------------------------
+WITH vs WITHOUT cuda-checkpoint, ISOLATED TO THE BINARY ITSELF
+------------------------------------------------------------------------------
+The clean A/B is not "plugin vs no plugin" -- it is the same criu, the same
+plugin, differing only in whether the helper binary is reachable, because
+cuda_plugin.c resolves `cuda-checkpoint` by NAME at dump time. Hiding it with
+PATH disables the plugin's ability to act while changing nothing else.
+
+Small CUDA process (512 MiB tensors + one captured CUDA graph, 2773 MiB device,
+36 /dev/nvidia* fds, 120 nvidia mappings). No manual cuda-checkpoint call in
+either arm -- criu owns the decision:
+
+    arm      cuda-checkpoint    criu dump          criu restore   graph replay
+    ------   ----------------   ----------------   ------------   ------------
+    plugin   on $PATH           rc=0  3.16s        rc=0  2.68s    IDENTICAL
+                                3.07 GiB image                    (3.0 == 3.0)
+    noplug   hidden from $PATH  rc=1  0.12s        --             --
+
+    noplug failure, verbatim:
+      Error (criu/proc_parse.c:116): handle_device_vma plugin failed:
+                                     No such file or directory
+      Error (criu/proc_parse.c:632): Can't handle non-regular mapping on
+                                     19525's map 200600000
+
+Two things to take from this.
+
+First, the ENOENT in that message is the missing *binary*, and the string is
+character-for-character the same one the plugin-less criu produced. So
+"handle_device_vma plugin failed: No such file or directory" never meant "criu
+does not support CUDA" -- it means a hook had nobody to call. Anyone diagnosing
+this from the error text alone will reach the wrong conclusion, twice.
+
+Second, when it works it is genuinely unattended. criu drove the whole GPU
+handshake from its own hooks -- device memory off, image written, device memory
+back, restore thread located -- with no orchestration from the caller:
+
+    dump.log    (03.110821) cuda_plugin: finished cuda_plugin stage 0 err 0
+    restore.log (01.128929) plugin: `cuda_plugin' hook 9 -> 0x7ff3c1757ce3
+                (01.656279) cuda_plugin: resuming devices on pid 19382
+                (01.656298) cuda_plugin: Restore thread pid 19403 found for
+                                         real pid 19382
+                (02.660639) cuda_plugin: finished cuda_plugin stage 2 err 0
+
+GPU memory went 2773 MiB -> 0 -> 2773 MiB across the round trip and the restored
+process replayed its captured CUDA graph to the same value. That is the "with
+cuda-checkpoint" capability, established on a process small enough to measure
+cheaply.
+
+------------------------------------------------------------------------------
+WHAT cuda-checkpoint COSTS, AND WHY IT DECIDES THE POD SPEC
+------------------------------------------------------------------------------
+cuda-checkpoint does not write device memory to disk. It moves it into the
+process's own anonymous pages. Measured on the small probe: 2773 MiB on the
+device became RSS 0.66 -> 3.30 GiB, i.e. essentially 1:1. On the real engine at
+TP=1 the tree went RSS 3.95 -> 76.78 GiB while both GPUs went to 0 MiB.
+
+That ratio is a hard requirement, not a detail. An 80 GiB H100 at
+--gpu-memory-utilization 0.9 needs ~72 GiB of host RAM per GPU *before* criu
+writes a byte, so TP=2 needs ~144 GiB -- more than the 128Gi the other manifests
+in this repo use. The TP=2 park arm would have been OOM-killed mid-checkpoint and
+the result would have looked like a criu failure. manifests/pod-exec-criu.yaml is
+at 384Gi for this reason and carries the arithmetic in a comment.
+
+Measured transfer rates, which the projections below use:
+    cuda-checkpoint D2H : 2.44 GiB/s      criu image per device GiB : 1.13x
+    cuda-checkpoint H2D : 2.29 GiB/s
+
+------------------------------------------------------------------------------
+THE BASELINE, AND WHAT IT SAYS ABOUT WHERE A CHECKPOINT COULD HELP
+------------------------------------------------------------------------------
+Three repeats each, registry-warm (so the ~15s modelinfos inspection documented
+in docs/measurement.md is NOT in these numbers):
+
+    TP=1 : 92.7 / 58.0 / 57.8   median 58.0s   r1 is a page-cache outlier
+                                               (weight load 56.8s vs ~30.0s)
+    TP=2 : 55.0 / 55.0 / 57.7   median 55.0s
+
+    TP=1 phase mix : weight load    30.0s (51.8%)   <- dominant
+                     cudagraph      10.6s (18.3%)
+                     imports         9.36s (16.1%)
+                     warmup          3.58s
+    TP=2 phase mix : imports        22.6s (41.0%)   <- dominant
+                     weight load    13.5s (24.5%)
+                     cudagraph       8.50s (15.4%)
+                     kv alloc        3.23s
+
+The two topologies have DIFFERENT bottlenecks, and that single fact decides which
+CRIU optimization is worth building. At TP=1 the cost is weights. At TP=2 the
+weights are split across two GPUs and load in 13.5s, while imports double to
+22.6s because the worker processes each pay them -- so at TP=2 the largest phase
+is pure CPU work that never touches the device.
+
+A checkpoint of a *warmed engine* attacks the weight phase. A checkpoint of a
+*pre-CUDA interpreter* attacks the import phase. They are different products.
+
+------------------------------------------------------------------------------
+WHAT A FULL-ENGINE PARK SHOULD COST -- PREDICTED BEFORE SPENDING A RUN ON IT
+------------------------------------------------------------------------------
+Written down before the arms were run (reports/criu-raw/predictions.txt), from
+the measured constants above, so the arms were a test of a stated prediction
+rather than a search for a favourable number:
+
+    TP=1  device 73 GiB -> image ~83 GiB
+      build   (off critical path) : cc checkpoint 30s + criu dump 137s = 167s
+      restore (ON critical path)  : criu read 23s + cc restore 32s    =  55s
+      vs cold boot 67s            : WIN by 12s
+    TP=2  device 146 GiB -> image ~165 GiB
+      build   (off critical path) : cc checkpoint 60s + criu dump 273s = 333s
+      restore (ON critical path)  : criu read 46s + cc restore 64s    = 109s
+      vs cold boot 55s            : LOSS by 54s
+
+The structural reason, which no amount of tuning changes: a full-engine park
+replaces "read 61 GiB of safetensors and copy H2D" with "read ~83 GiB of criu
+image and copy H2D". Both legs got BIGGER. The image is larger than the weights
+it replaces, because it contains the weights plus the KV cache plus the captured
+graphs plus the interpreter. Restoring is not a shortcut past the work; it is the
+same work on a bigger file. And it scales the wrong way -- at TP=2 the image
+doubles while the baseline it must beat gets FASTER (55.0s vs 58.0s), so the
+margin goes sharply negative.
+
+This is a warm-standby mechanism being measured as a cold-start one. As warm
+standby -- keep a parked replica resident and revive it instead of booting it --
+it is a different product with a different cost model (you are paying 384Gi of
+host RAM per parked replica).
+
+SCORING THE PREDICTION, once the arm actually ran (TP=1, spawn, below):
+
+    predicted restore : 55s   (criu read 23s + cc restore 32s, serial)
+    measured restore  : 37.6s -> health at 37.7s
+    predicted verdict : WIN by 12s over a 67s boot
+    measured verdict  : WIN by 20s over the 58.0s baseline median
+
+Direction right, magnitude wrong, and the error is instructive: the model treated
+"read the image" and "copy host->device" as two serial legs at the independently
+measured 2.29 GiB/s H2D rate. They are not serial. criu restores 76.02 GiB in
+37.6s -- 2.0 GB/s end to end, which is faster than the H2D rate alone -- so the
+device copy overlaps the disk read rather than following it. Any projection built
+by adding cuda-checkpoint's transfer time to criu's I/O time will therefore be
+pessimistic by roughly the smaller of the two.
+
+The structural argument above survives at TP=2 for a different reason than
+arithmetic, and that reason is a hard stop rather than a margin: see BLOCKER 2.
+
+------------------------------------------------------------------------------
+AND ON REAL vLLM THE PARK ROUTE HAS TWO INDEPENDENT BLOCKERS -- ONE REMOVABLE
+------------------------------------------------------------------------------
+BLOCKER 1 -- surviving /dev/nvidiactl descriptors (TP=1). PRE-PLUGIN evidence,
+so read it as "what manual parking plus a plugin-less criu does":
+
+    before park  pid 2753 (vllm)            nvidia_fds=11
+                 pid 3062 (VLLM::EngineCor) nvidia_fds=44
+    cc checkpoint pid 2753 ok 0.06s;  pid 3062 ok 22.60s
+    after park   gpu 0 MiB both; tree RSS 3.95 -> 76.78 GiB
+                 pid 3062 nvidia_fds=9  state=checkpointed   <- NINE SURVIVED
+    criu dump    rc=1 in 0.73s
+      Error (criu/files-ext.c:94): Can't dump file 9 of that type [20666]
+                                   (chr 195:255)
+
+195:255 is /dev/nvidiactl. cuda-checkpoint did not fail -- it succeeded on both
+pids, moved every byte off the device, and reported state=checkpointed. The 22.60s
+it spent is 73 GiB at ~2.4 GiB/s, exactly the small probe's D2H rate. What is
+left over is not CUDA context.
+
+It is not a size problem: arm `thin` (/sleep?level=2, which discards the weights
+and leaves ~6.6 GiB instead of ~76 GiB) failed at 0.72s on the identical fd. A
+blocker that is a file descriptor does not care how many bytes you removed.
+
+What it is instead took two more probes to establish, and the first answer was
+wrong -- see "THE ACTUAL MECHANISM: the multiprocessing start method" below.
+Read this paragraph as an observation with its cause deferred: nine /dev/nvidia*
+descriptors on EngineCore outlive a successful park, and one of them stops the
+dump. BLOCKER 1 is the one blocker in this report that turned out to be
+REMOVABLE.
+
+BLOCKER 2 -- cuda-checkpoint itself wedges at TP>1. Measured at TP=2:
+
+    cc lock       pid 12315 (VLLM::EngineCor) ok in 0.05s
+    cc checkpoint pid 12315                   ok in 0.09s
+    cc lock       pid 12553 (VLLM::Worker_TP) ok in 0.05s
+    cc checkpoint pid 12553  HUNG (>120s) -- wchan=do_poll.constprop.0
+    cc checkpoint pid 12554  HUNG (>120s) -- wchan=do_poll.constprop.0
+    park took 240.61s;  gpu STILL 78229 MiB on both  <- nothing was released
+
+The processes that hang are exactly the two holding live NCCL communicators; the
+root and EngineCore, which hold none, complete in 0.09s. This is the same TP>1
+mutual exclusion this repo already documented for vLLM's own /sleep (releasing
+NCCL requires destroying captured graphs), now located one layer lower, inside
+cuda-checkpoint. It is not a vLLM bug and not a criu bug.
+
+That arm also produced 262 non-fatal `NVRM: Xid 137/94` and `nvidia-nvswitch*:
+SXid` fabric entries (NVLink TLC RX / CE User Channel PRIV errors) across all
+four NVSwitches, timestamped inside the hang window, and the process tree was
+dead ~12 minutes later without any OOM-killer event. Reported as an observed
+correlation, not confirmed causation: suspending CUDA contexts that are actively
+driving NVLink appears to disturb the fabric. Two practical consequences -- a
+wedged cuda-checkpoint at TP>1 is not merely slow, it may not be recoverable in
+place; and the criu error that arm eventually printed
+(cuda_plugin.c:222 "Could not find restore thread") is CONFOUNDED, because by
+then the tree it named was already gone. It is not usable as evidence about the
+plugin.
+
+------------------------------------------------------------------------------
+THE PLUGIN ON REAL vLLM, TP=1, fork: THE PLUGIN WORKS, THE DUMP STILL DOES NOT
+------------------------------------------------------------------------------
+This is the arm the whole exercise was for, and it is where the investigation
+actually turns. criu 4.1.1 with cuda_plugin.so,
+cuda-checkpoint on $PATH, a warmed Qwen3-32B engine, and NO manual checkpoint
+call -- criu owns the GPU handshake exactly as it did on the small process where
+it worked. Result:
+
+    boot to health_200 : 61.01s
+    tree               : 25407 (vllm) nvidia_fds=11, 25722 (EngineCor) nvidia_fds=44
+    criu dump          : FAILED, rc=1, in 34.20s
+      Error (criu/files-ext.c:94): Can't dump file 9 of that type [20666]
+                                   (chr 195:255)
+      Error (criu/cr-dump.c:1681): Dump files (pid: 25722) failed with -1
+
+The 34.20s is the important number, because pre-plugin the identical error
+arrived in 0.73s. The plugin was not skipped; it did the entire job and then the
+job was wasted:
+
+    (00.099058) Plugin "cuda_plugin" (version 512 hooks 12)
+    (00.191406) cuda_plugin: pausing devices on pid 25407
+    (00.324614) cuda_plugin: pausing devices on pid 25722
+    (00.416979) cuda_plugin: Checkpointing CUDA devices on pid 25407 restore_tid 25464
+    (00.513956) cuda_plugin: Checkpointing CUDA devices on pid 25722 restore_tid 25731
+    (22.807856) 25722 fdinfo 9: pos: 0 flags: 100002/0x1
+    (22.807859) Error (criu/files-ext.c:94): Can't dump file 9 of that type (chr 195:255)
+    (22.808205) cuda_plugin: finished cuda_plugin stage 0 err -1
+    (23.229832) cuda_plugin: resuming devices on pid 25407
+    (24.558421) cuda_plugin: resuming devices on pid 25722
+
+Read that sequence carefully, because it is the whole finding:
+
+  * cuda-checkpoint did not fail. The plugin did not fail. Both did exactly what
+    they promise -- ~22.3s of device-to-host transfer, which is 73 GiB at the
+    2.4 GiB/s D2H rate measured independently on the small probe.
+  * criu then walked the file descriptors and refused fd 9 of EngineCore:
+    character device 195:255 is /dev/nvidiactl, opened O_RDWR|O_CLOEXEC.
+  * the plugin unwound correctly -- resumed devices on both pids, GPU memory came
+    back (74653 MiB), the engine survived the failed dump alive and serving.
+
+So on real vLLM, cuda-checkpoint plus the official criu CUDA plugin are NECESSARY
+BUT NOT SUFFICIENT. On the small pure-CUDA process the same combination is
+sufficient: 36 /dev/nvidia* fds, all of them CUDA-context fds, all released, dump
+rc=0. The difference is not scale and not tensor-parallelism -- it is WHICH fds
+the process holds.
+
+    process              nvidia fds   plugin dump      what the fds are
+    ------------------   ----------   --------------   -------------------------
+    small CUDA probe     36           rc=0  3.16s      all CUDA context
+    vLLM TP=1 engine     11 + 44      rc=1 34.20s      CUDA context + something
+                                                       cuda-checkpoint does not own
+
+Evidence for what that something is -- and this is where I got it wrong first,
+so the wrong answer is left in with its refutation rather than quietly deleted.
+
+THE HYPOTHESIS: NVML. criu's -v4 log lists libnvidia-ml.so.580.105.08 among the
+engine's mapped files, and vLLM reaches NVML through pynvml for device queries
+and memory profiling. NVML opens /dev/nvidiactl independently of any CUDA
+context, only the owning process can release it (nvmlShutdown()), and
+cuda-checkpoint's remit is the CUDA context -- it has no claim on an NVML handle.
+That story fits every observation above and it is wrong.
+
+THE REFUTATION (scripts/criu-nvml-isolate.sh, reports/criu-raw/nvml-isolate.txt).
+The hypothesis makes a cheap, falsifiable prediction: a process holding an NVML
+handle on /dev/nvidiactl should not be dumpable. It is:
+
+    (c) python holding 11 /dev/nvidia* fds INCLUDING /dev/nvidiactl,
+        no CUDA memory allocated       -> criu dump rc=0, 609 MB
+    (d) same process calls nvmlShutdown()
+        -> NVMLError_Uninitialized, fd count UNCHANGED at 11
+    (e) dump again                     -> rc=0
+
+So holding /dev/nvidiactl does not block a dump, and the plugin's ext-file hook
+claims those descriptors perfectly well. NVML was not the blocker. Note also that
+(d) undercuts the "just call nvmlShutdown()" remedy independently: it did not
+close a single fd.
+
+THE ACTUAL MECHANISM: the multiprocessing start method. What separates the
+dumpable small probe from the undumpable engine is not scale, not
+tensor-parallelism and not NVML -- it is that EngineCore is a FORKED child.
+manifests/pod-exec-criu.yaml sets VLLM_WORKER_MULTIPROC_METHOD=fork, so
+EngineCore inherits the root's already-open /dev/nvidia* descriptors instead of
+opening its own. criu's plugin hook can claim a descriptor a process opened; it
+cannot attribute one that arrived by inheritance and is now shared across a
+fork boundary with a different device state on each side.
+
+The prediction that follows is a one-line change, and it holds:
+
+    VLLM_WORKER_MULTIPROC_METHOD   EngineCore nvidia_fds   plugin dump, TP=1
+    ----------------------------   ---------------------   -----------------------
+    fork    (manifest default)     44                      rc=1 in 34.20s, fd 9
+    spawn                          38                      rc=0 in 49.46s
+
+------------------------------------------------------------------------------
+THE ARM THAT WORKS: TP=1, PLUGIN, spawn -- A COMPLETE UNATTENDED ROUND TRIP
+------------------------------------------------------------------------------
+Same script, same model, same plugin, same node. One environment variable
+changed. criu drove the entire GPU handshake with no manual cuda-checkpoint call
+at any point (reports/criu-raw/vllm-tp1-live-spawn.txt):
+
+    boot to health_200        : 61.38s
+    tree                      : 30228 (vllm)            nvidia_fds=11
+                                30527 (python3)         nvidia_fds=0
+                                30528 (VLLM::EngineCor) nvidia_fds=38
+    criu dump                 : 49.46s for 76.02 GiB   (1574 MB/s)
+                                largest image: pages-13.img  74.89 GiB
+                                gpu after dump: 0 MiB
+    criu restore (cache cold) : 37.61s   (76.02 GiB evicted first)
+    restore -> health_200     : 37.69s
+    restore -> completion     : 38.48s
+    correctness               : IDENTICAL
+
+Against the harness baseline of 58.0s median to health_200 at TP=1, a restore
+reaches health in 37.69s. That is the first genuine cold-start win CRIU has
+produced in this repo: ~20s, 35%.
+
+Three qualifications, all of which matter more than the headline.
+
+QUALIFICATION 1 -- the win requires spawn, and spawn is the thing the manifest
+deliberately turns off. VLLM_WORKER_MULTIPROC_METHOD=fork is set precisely
+because a spawned EngineCore re-imports the whole stack: measured at 15.5s, 28%
+of a 55.3s run (see the manifest comment at pod-exec-criu.yaml:98-137). So the
+comparison a deployment actually faces is not 37.69s vs 58.0s. It is:
+
+    fork,  ordinary boot          58.0s   (baseline median)  criu: impossible
+    spawn, ordinary boot          61.4s   (this arm's own boot)
+    spawn, criu restore           37.7s
+
+Fork and CRIU are MUTUALLY EXCLUSIVE optimizations. You may have the 15.5s
+import shortcut on every boot, or the 20s checkpoint win on restores, never both.
+That is a real architectural constraint on stacking cold-start levers, and it is
+the most transferable finding in this report.
+
+QUALIFICATION 2 -- the image is single-use as produced. Restoring the SAME image
+a second time fails immediately:
+
+    criu restore rc=1 in 0.19s
+      Error (criu/files-reg.c:2258): Can't link dev/shm/link_remap.644 ->
+                                     dev/shm/sem.NCBGyB: No such file or directory
+      Error (criu/mem.c:1409): Can't open vma
+      30528 exited, status=1
+
+criu was invoked with --link-remap, which handles a deleted-but-still-open file
+by hard-linking it back into the filesystem at dump time -- here a POSIX semaphore
+under /dev/shm that vLLM's multiprocessing unlinked while keeping it mapped. The
+first restore consumes that link; the second finds nothing. The image therefore
+depends on state OUTSIDE itself, which means the measured 37.69s is a restore into
+the pod that produced the dump, NOT into a fresh replica: a fresh pod's /dev/shm
+would not contain link_remap.644 either, and would fail identically.
+
+My first reading of this was that it was self-inflicted -- --link-remap is passed
+by scripts/criu-vllm-probe.sh, not required by criu, and a 32-byte semaphore is far
+under the default 1 MiB --ghost-limit, so criu should have been willing to write it
+into the image as a ghost file instead. I made the flag opt-out and re-ran the
+identical arm to check. It is not self-inflicted:
+
+    criu dump rc=1 in 33.30s   (boot was 64.55s; arm otherwise identical)
+      Error (criu/files-reg.c:1122): Can't create link remap for
+                                     /dev/shm/sem.7R6Tks. Use link-remap option.
+      Error (criu/cr-dump.c:1570): Collect mappings (pid: 65002) failed with -1
+      Error (criu/cr-dump.c:2111): Dumping FAILED.
+
+criu does not ghost this file. It refuses the dump and names the flag as
+mandatory. So the two properties are welded together:
+
+    to dump a warmed vLLM engine at all, --link-remap is REQUIRED
+    with --link-remap, the image is NOT SELF-CONTAINED
+
+That is a structural blocker on "build one image, restore it on many replicas",
+which is the entire reason to want a full-engine checkpoint. It is not a tuning
+problem and there is no third flag setting in between. The narrow remaining
+workaround is that the missing state is small and on a known path: shipping the
+dump-time /dev/shm contents ALONGSIDE the image, so a fresh pod is given the
+link_remap.NNN files before restore, might make the pair portable even though the
+image alone is not. Named as a concrete next step, NOT measured.
+
+One incidental de-confounding from this run. cuda_plugin.c:222 ("Could not find
+restore thread for process ID 65001") appeared here NON-fatally, twice, against the
+CUDA-less python3 intermediate in the tree (nvidia_fds=0, cc_state "initialization
+error") while the dump continued for another 33s. An earlier arm printed the same
+error and it was flagged above as confounded. It can now be read as benign noise
+the plugin emits for a process in the tree that has no CUDA state, rather than as a
+signal about the plugin's health.
+
+QUALIFICATION 3 -- the 76 GiB has to go somewhere, twice. The image is
+76.02 GiB on node-local disk for a model whose weights are 61 GiB, and the pod
+needs 384Gi of RAM to hold the parked footprint (see the pod-spec section above).
+A restore reads 76 GiB at 2.0 GB/s; a cold boot reads 61 GiB of safetensors. The
+win does not come from moving less data -- it comes from skipping the CPU work
+between the reads: imports, compile-cache lookup, memory profiling, graph
+capture. Note also that the script's tree-RSS reading (4.12 GiB before and after)
+is NOT the parked footprint: with no manual park there is nothing to sample
+before criu's plugin acts. pages-13.img at 74.89 GiB is the reliable witness.
+
+------------------------------------------------------------------------------
+THE OTHER OPTIMIZATION: AN IMPORT-WARM IMAGE, AND THE ONE IMPORT THAT PAYS
+------------------------------------------------------------------------------
+The baseline says TP=1 is weight-bound and TP=2 is import-bound, so the second
+optimization worth a run is the one that attacks imports: dump a python process
+that has imported the stack but has not built an engine, then restore it and let
+it become `vllm serve` (scripts/criu-preboot.sh). The image is hundreds of
+megabytes rather than tens of gigabytes.
+
+It was designed to leave the device alone entirely -- no cuda-checkpoint, no
+plugin, no device coupling. That turned out to be available only in the version
+that is not worth deploying, and the section ends on why. Read the two stages
+below as one result: --stage vllm is the device-free one, --stage server is the
+one that works.
+
+The --stage vllm build, which is off the critical path -- it happens once per
+(image, model, flag set), like a container build:
+
+    preload (import torch, import vllm) : 3.02s
+      stage=torch  1.00s  cumulative 1.00s  nvidia_fds=0  rss 0.50 GiB
+      stage=vllm   1.69s  cumulative 2.69s  nvidia_fds=0  rss 0.71 GiB
+    criu dump                           : 3.02s, rc=0
+    image                               : 0.42 GiB  (pages-1.img 0.42 GiB)
+
+Measured at both topologies, restore arm against cold arm, same script, same
+poller, same node, back to back (reports/criu-raw/preboot-measure-*.txt). Two
+image builds were used -- build A before a harness bug was found and B after (see
+the guard note below) -- and both are shown, because the spread between them is
+part of the result:
+
+  tp  arm       image    criu restore  -> health_200  -> completion  text
+  --  -------   ------   ------------  ------------   ------------   --------
+  1   restore   build A  1.89s         53.50s         54.31s         ' Paris...'
+  1   restore   build B  1.82s         54.80s         55.61s         ' Paris...'
+  1   cold      n/a      n/a           57.13s         57.93s         ' Paris...'
+  2   restore   build B  1.91s         54.70s         55.18s         ' Paris...'
+  2   cold      n/a      n/a           56.16s         56.64s         ' Paris...'
+
+Every completion is coherent English and matches its cold control for the same
+topology. The TP=1 cold arm's 57.13s independently reproduces the harness baseline
+median of 58.0s, which is the cross-check that says the two arms measure the same
+thing.
+
+    TP=1 win : 2.33s to 3.63s  (4.1% to 6.4%)
+    TP=2 win : 1.46s           (2.6%)
+
+STATE THE LIMIT OF THAT CLAIM BEFORE READING ANYTHING INTO IT. Each cell is n=1.
+The same TP=1 restore configuration measured 53.50s on build A and 54.80s on build
+B -- a 1.30s spread between two runs that should be identical, which is 89% of the
+entire TP=2 effect. So: the TP=1 win is larger than the observed run-to-run
+spread and is probably real. The TP=2 win is NOT separable from noise at n=1 and
+should be treated as "no effect demonstrated" rather than "1.46s". Establishing it
+either way needs repeats, which this pass did not spend.
+
+AND A LATER SESSION SAYS THE TP=1 NUMBER ABOVE IS TOO GENEROUS. The --stage server
+arms below carry cold controls of their own, run the same evening on the same pod
+with the same script and no config difference from the 57.13s above:
+
+    session A (--stage vllm)   TP=1 cold : 57.13s                (n=1)
+    session B (--stage server) TP=1 cold : 55.24s, 54.19s  mean 54.72s  (n=2)
+
+That is 2.41s of between-session drift on a configuration that did not change,
+which is larger than the entire TP=1 win claimed above. The arithmetic points the
+same way: this arm carries 2.67s of imports and spends 1.87s restoring them, so
+the most it can return is 0.80s -- and 2.33-3.63s is three to four times that
+bound. Two independent readings therefore say the same thing, and the honest
+conclusion is that the --stage vllm win is roughly 0.8s and the rest was a slow
+cold control. Treat the table's TP=1 win as an upper bound, not a measurement.
+This cannot be proven outright, because session A never repeated its cold arm --
+which is exactly the omission that let a 2.4s baseline drift look like a result.
+The reason it matters is not bookkeeping: 0.8s is not worth a privileged pod, so
+under the corrected reading the device-free version of this optimization does not
+justify itself, and everything that does is in the --stage server arm.
+
+WHY IT IS ONLY 3.6s, WHEN "python imports" IS 22.6s OF A TP=2 BOOT. Because they
+are not the same imports. The image carries `import torch` + `import vllm` for the
+API-server process: 2.69s of work, and it bought 3.63s. The 22.6s import phase in
+the baseline breakdown is a different and larger set -- the deeper module graph,
+driver and CUDA initialisation, and at TP>1 the re-imports paid again inside each
+spawned child, which an image of the PARENT cannot remove. The lever pays back
+almost exactly what it carries, so the ceiling is set by what you can get into the
+image, not by the size of the phase whose name it shares.
+
+--stage server: THE EXTENSION, NOW MEASURED, AND IT IS THE ONLY VERSION WORTH
+DEPLOYING. The paragraph above stood in this report as an unmeasured prediction:
+carry 6.15s of imports instead of 2.69s, pay the plugin and cuda-checkpoint for
+the 11 /dev/nvidia* fds it opens, roughly double the win. It has now been run
+(reports/criu-raw/preboot-{build,measure-*}-server-tp*.txt).
+
+The build, once, off the critical path:
+
+    preload (imports)                   : 6.53s to ready
+      stage=torch   1.03s  cumulative 1.03s  nvidia_fds=0   rss 0.50 GiB  thr 16
+      stage=vllm    1.65s  cumulative 2.67s  nvidia_fds=0   rss 0.70 GiB  thr 17
+      stage=server  3.58s  cumulative 6.25s  nvidia_fds=11  rss 0.95 GiB  thr 32
+    criu dump                           : 3.63s, rc=0
+    image                               : 0.59 GiB  (pages-1.img 0.59 GiB)
+
+That dump is the first in this entire report to serialize a real vLLM-stack
+process holding /dev/nvidia* fds, and the plugin is visibly doing the work rather
+than being tolerated:
+
+    (00.108783) cuda_plugin: initialized: cuda_plugin stage 0
+    (01.349999) cuda_plugin: pausing devices on pid 67445
+    (02.588258) cuda_plugin: Checkpointing CUDA devices on pid 67445 restore_tid 67466
+    (03.564840) cuda_plugin: finished cuda_plugin stage 0 err 0
+
+    (00.103770) cuda_plugin: initialized: cuda_plugin stage 2
+    (01.050825) cuda_plugin: resuming devices on pid 67445
+    (01.050843) cuda_plugin: Restore thread pid 67466 found for real pid 67445
+    (02.319188) cuda_plugin: finished cuda_plugin stage 2 err 0
+
+Compare `err 0` here against `err -1` in the TP=1 fork arm above. Same plugin,
+same binary, same node; what changed is only which fds the process holds and how
+it came to hold them.
+
+Restore against cold, one image, all arms back to back on one pod, colds
+interleaved with restores rather than run as a block:
+
+  tp  arm       criu restore  -> health_200  -> completion  text
+  --  -------   ------------  ------------   ------------   --------
+  1   restore   2.27s         51.06s         51.87s         ' Paris...'
+  1   restore   2.34s         50.23s         51.04s         ' Paris...'
+  1   cold      n/a           55.24s         56.05s         ' Paris...'
+  1   cold      n/a           54.19s         55.00s         ' Paris...'
+  2   restore   2.31s         52.81s         53.30s         ' Paris...'
+  2   cold      n/a           55.37s         55.85s         ' Paris...'
+
+Every completion is coherent English and matches its cold control at the same
+topology. The health_200 figures are all-in: the clock starts before `criu
+restore`, so the 2.3s is inside the 51s and not additional to it.
+
+    TP=1 : restore 50.65s mean (n=2, spread 0.83s)
+           cold    54.72s mean (n=2, spread 1.05s)
+           win     4.07s  (7.4%)
+    TP=2 : restore 52.81s  cold 55.37s  win 2.56s (4.6%), n=1 each
+
+THE ACCOUNTING CLOSES, WHICH IS WHY THIS ONE IS BELIEVABLE. The arm carries 6.25s
+of imports and spends 2.31s restoring them, so the most it can return is 3.94s.
+It returned 4.07s. Two quantities measured independently inside the runs predict
+the third to within 0.13s, and both TP=1 spreads (0.83s, 1.05s) are smaller than
+the effect. That is a different quality of result from the --stage vllm arm, where
+the same arithmetic over-ran its bound fourfold. It also fixes the ceiling: the
+win of this technique is (imports carried) minus (restore cost), nothing more, so
+the only way to grow it is to get more imports into the image -- and the next
+thing after this import is engine construction, which is the 76 GiB single-use
+route this report already priced.
+
+SCORING THE PREDICTION. Direction: right. Mechanism: right, including the specific
+claim that the 11 fds would be survivable rather than fatal. Magnitude: "roughly
+double" landed next to the measured 4.07s, but only because the number it doubled
+was itself inflated by a slow cold control; against the corrected ~0.8s baseline
+the true multiple is about five. So the prediction was accidentally accurate and
+the reasoning behind it was sound -- do not credit the arithmetic that produced
+the "double".
+
+AND THE PRIZE AND THE PRICE ARE THE SAME IMPORT. The stage-server increment was
+written in the script as "the module graph `vllm serve` pulls in, minus anything
+that would touch the device". That comment was false, and its falseness is the
+whole shape of this result. Importing the four modules one at a time:
+
+    vllm.entrypoints.openai.api_server      +3.50s   nvidia_fds 0 -> 11
+    vllm.entrypoints.cli.main               +0.00s   nvidia_fds 11
+    vllm.engine.arg_utils.AsyncEngineArgs   +0.00s   nvidia_fds 11
+    uvicorn, fastapi                        +0.00s   nvidia_fds 11
+
+One import is the entire 3.5s and the entire device contact -- platform resolution
+reaches CUDA -- and the other three are already in via it. So there is no cheaper
+subset to prefetch: the 3.5s that lifts this optimization from 0.8s to 4.1s is
+inseparable from the fd set that forces criu to need cuda_plugin.so and
+cuda-checkpoint. The device-free image and the useful image are not two points on
+a dial; the second one is where the value is, and it drags the whole
+cuda-checkpoint apparatus in with it. The comment in scripts/criu-preboot.sh has
+been corrected to say so.
+
+IMAGE REUSE, WHICH THE FULL-ENGINE IMAGE FAILED. The --stage vllm build B was
+restored twice from one dump with no rebuild between (TP=2 rc=0 in 1.91s, then
+TP=1 rc=0 in 1.82s). The --stage server image was restored THREE times -- TP=1,
+TP=1 again, then TP=2 -- all rc=0, all serving correct output, no `Error (` line
+in any restore log. That last point matters more than the repeat count: the third
+restore ran at a different tensor-parallel size than the first two from the same
+bytes, because the image contains imports and no engine, and the topology is
+passed in after the restore. One image therefore serves every model and flag
+combination, against 76 GiB per combination for the full-engine route.
+
+It survives for a reason worth stating precisely, because this is where the
+full-engine image died in 0.19s on a /dev/shm link-remap. The server-stage dump
+ran with --link-remap too, and its log shows the flag was never used:
+
+    (00.106144) Will allow link remaps on FS      <- enablement, not a remap
+    (no deleted/unlinked file lines at all)
+
+The image's only out-of-image dependency is two ordinary log files whose dump-time
+sizes are recorded in filesizes.txt and restored before the run. So the single-use
+property is not a property of criu images, nor of --link-remap: it is specific to
+the semaphores vLLM leaves unlinked under /dev/shm once the engine is up. An image
+taken before the engine exists does not have the problem, and that is a second,
+independent reason this is the shape worth pursuing.
+
+------------------------------------------------------------------------------
+A HARNESS BUG WORTH RECORDING, BECAUSE IT LOOKED EXACTLY LIKE A criu LIMIT
+------------------------------------------------------------------------------
+The first TP=2 preboot attempt did not fail like a measurement, it failed like a
+platform limitation: criu restore returned rc=0 in 1.90s, the restored process
+came back, and then nothing happened for the full 900s poller timeout with the
+GPUs sitting at 4 MiB. Read at face value that says "a criu-restored process
+cannot bring up tensor-parallel vLLM".
+
+It says nothing of the kind. From the child log:
+
+    WARNING [system_utils.py:157] We must use the `spawn` multiprocessing start
+        method. Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'.
+        Reasons: CUDA is initialized
+    start pid=36425 nvidia_fds=0 rss=0.01GiB          <- the SPAWNED EngineCore
+    stage=torch took=0.96s ... preload done cumulative=2.56s
+
+A criu-restored process has CUDA initialised, so vLLM force-overrides fork to
+spawn. Python's spawn rebuilds the child by RE-IMPORTING __main__ -- and __main__
+is the preload script, which had no `if __name__ == "__main__"` guard. The spawned
+EngineCore therefore re-ran the preload from the top instead of becoming
+EngineCore, and the tree wedged in do_poll with 37 threads.
+
+TP=1 hid the bug completely, because UniProcExecutor forks EngineCore and fork
+does not re-import __main__. So the bug was invisible at one topology and looked
+like a hard limit at the other.
+
+The fix is the guard (scripts/criu-preboot.sh, with this incident recorded at the
+guard): under a spawn re-import __name__ is "__mp_main__", so the preload is
+skipped and multiprocessing's bootstrap proceeds. With it, TP=2 restore reaches
+health_200 in 54.70s instead of timing out, and no second "preload done" block
+appears in the child log -- which is the single line that distinguishes the two
+outcomes.
+
+Two transferable lessons. First, any scheme that dumps a process and later turns
+it into a server must assume the server may spawn: the dumped process's __main__
+becomes the child's __main__, and it must be import-safe. Second, "CUDA is
+initialized" is a property criu-restored processes have for free, so a restored
+process silently loses fork as an option -- the same coupling that decides the
+full-engine arm above, arriving from the opposite direction.
+
+------------------------------------------------------------------------------
+VERDICT: WHAT TO DO WITH THIS, AT EACH TOPOLOGY
+------------------------------------------------------------------------------
+All measurements, one table. health_200 unless noted; n=1 per cell except the
+baselines (3 repeats) and the --stage server TP=1 cells (n=2).
+
+  route                              TP=1              TP=2
+  --------------------------------   ---------------   ----------------------
+  baseline, fork (harness median)    58.0s             55.0s
+  full-engine criu, fork             DUMP REFUSED      DUMP REFUSED
+  full-engine criu, spawn            37.69s *          cuda-checkpoint WEDGES
+  import-warm, --stage vllm          54.80-53.50s      54.70s
+    its own cold control             57.13s            56.16s
+  import-warm, --stage server        50.65s mean       52.81s
+    its own cold control             54.72s mean       55.37s
+
+  * and only back into the pod that produced it -- see QUALIFICATION 2.
+
+Read the two import-warm rows as one route at two settings, not as two options.
+The --stage vllm row is the device-free version and its apparent 2.3-3.6s does not
+survive its own arithmetic (bound: 0.80s) or a second session's cold control; call
+it ~0.8s. The --stage server row is the version that works: 4.07s at TP=1, with
+the accounting closing to 0.13s, and it needs cuda_plugin.so because the single
+import that earns the 4s is also the one that opens 11 /dev/nvidia* fds.
+
+RECOMMENDATION, in order of confidence.
+
+1. DO NOT adopt the full-engine checkpoint for cold start. Not because it is slow
+   -- at TP=1 it is genuinely the fastest thing measured here -- but because of
+   what it costs to have it: you must give up VLLM_WORKER_MULTIPROC_METHOD=fork
+   (worth 15.5s on every ordinary boot), provision 384Gi of host RAM per replica,
+   store 76 GiB per model-and-flag combination, and accept an image that cannot
+   currently be moved to another pod. At TP=2 the question does not arise, because
+   cuda-checkpoint wedges on the NCCL-holding processes and nothing downstream can
+   be measured.
+
+2. The import-warm image at --stage server is the shape worth keeping: 0.59 GiB,
+   a 3.6s build, a 2.3s restore, 4.07s off TP=1 (7.4%) and 2.56s off TP=2 with the
+   accounting closing to 0.13s. Crucially the image is reusable and topology-
+   agnostic -- one dump served three restores at two different TP values -- so it
+   is one artifact per container image rather than 76 GiB per model-and-flag
+   combination, and it needs no /dev/shm state to be portable.
+
+   Size the expectation before adopting it. The win is exactly (imports carried)
+   minus (restore cost), and it is already at that bound, so there is no tuning
+   left: the next import after this one is engine construction, which is
+   recommendation 1's route with all of recommendation 1's costs. And it is not
+   free of the apparatus -- it needs cuda-checkpoint and cuda_plugin.so, therefore
+   a privileged pod, because the one import worth prefetching is the one that
+   touches the device. Weigh 4s against that, and note that the device-free
+   variant which would avoid it is worth only ~0.8s. Remaining work before
+   adoption: TP=2 repeats (n=1), and a restore into a DIFFERENT pod from the one
+   that built the image -- reuse is shown, cross-pod portability is not.
+
+3. If a checkpoint is wanted for WARM STANDBY rather than cold start, the TP=1
+   spawn result is a real capability and the numbers above are the right ones to
+   price it with. That is a different product -- you are paying 384Gi of resident
+   host RAM per parked replica to save ~20s -- and it should be argued on those
+   terms, not as a cold-start optimization.
+
+4. The one finding that transfers regardless of whether anyone adopts CRIU:
+   fork and CRIU are mutually exclusive, and a criu-restored process loses fork
+   automatically because it comes back with CUDA already initialised. Any future
+   plan that stacks "fork to skip re-imports" with "restore from a checkpoint" is
+   stacking two levers that cannot both be pulled.
+
+WHAT WAS NOT MEASURED, stated so nobody reads it as measured: whether any of these
+images restores into a DIFFERENT pod than the one that dumped it (all reuse here is
+same-pod); whether shipping /dev/shm alongside the FULL-ENGINE image makes that one
+portable; whether spawn also unblocks TP=2 (expected not -- the wedge is in
+cuda-checkpoint, below vLLM); repeats on the --stage server TP=2 cell and on every
+--stage vllm cell; and a --stage server run against a second model, since the
+image is topology-agnostic but only one model was ever served from it.
+
+------------------------------------------------------------------------------
+EVIDENCE INDEX (reports/criu-raw/)
+------------------------------------------------------------------------------
+environment.txt                     pod, node, versions, plugin build provenance
+matrix.txt, matrix-plugin.txt       small CUDA probe: live/ckpt/noc, plugin/noplug
+nvml-isolate.txt                    the probe that refuted the NVML hypothesis
+predictions.txt                     projections written before the arms ran
+preboot-probe.txt                   import-stage timings and where the driver appears
+preboot-build-vllm*.txt             import-warm image builds (A, and B with guard)
+preboot-build-server.txt            --stage server build: first plugin dump of the
+                                    real vLLM stack holding /dev/nvidia* fds
+preboot-measure-*-tp{1,2}.txt       --stage vllm restore vs cold, both topologies
+preboot-measure-*-server-tp*.txt    --stage server restore vs cold, incl. repeats
+vllm-tp1-live.txt, -thin, -ckpt     PRE-PLUGIN arms; read as package limits
+vllm-tp{1,2}-live-plugin.txt        plugin installed, fork: dump refused / wedge
+vllm-tp1-live-spawn.txt             THE ROUND TRIP THAT WORKED
+vllm-tp1-live-spawn-ghost.txt       same arm without --link-remap: dump refused
+fd-forensics / fd-wall.txt          descriptor inventories
+==============================================================================

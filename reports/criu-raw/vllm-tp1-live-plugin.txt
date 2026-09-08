@@ -1,0 +1,36 @@
+[reaper] subreaper armed, pid=25381
+======================================================================
+criu-vllm-probe  arm=live tp=1 model=Qwen/Qwen3-32B max-model-len=8192
+criu Version: 4.1.1   cc Version 580.105.08.
+image dir: /criu/img/vllm-tp1-live   log: /tmp/criu-vllm-tp1-live.log
+gpu at start: 0, 0 MiB 1, 0 MiB 
+container mem limit: unknown
+======================================================================
+[13:42:50] step 1: cold boot (this is the number the restore has to beat)
+[13:43:51]   health_200 at 61.01s   gpu=0, 74653 MiB 1, 4 MiB 
+[13:43:52]   baseline completion: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+[13:43:52]   tree: 25407(vllm) 25722(VLLM::EngineCor) 
+[13:43:52]   pids holding /dev/nvidia*: 25407 25722 
+[13:43:52]   tree RSS before park: 3.99 GiB
+[13:43:52] step 2: no park -- dumping a live CUDA process on purpose
+[13:43:52]   tree RSS parked: 3.99 GiB   (this is the floor on image size)
+[13:43:52]     pid=25407 (vllm) rss=1.40 GiB nvidia_fds=11 cc_state=running
+[13:43:52]     pid=25722 (VLLM::EngineCor) rss=2.59 GiB nvidia_fds=44 cc_state=running
+[13:43:52] step 3: criu dump the tree rooted at 25407
+[13:44:26]   criu dump rc=1 in 34.20s  image=1.12 GiB
+[13:44:26]   --- criu refused. error lines: ---
+      (22.807859) Error (criu/files-ext.c:94): Can't dump file 9 of that type [20666] (chr 195:255)
+      (22.807888) Error (criu/cr-dump.c:1681): Dump files (pid: 25722) failed with -1
+      (34.181914) Error (criu/cr-dump.c:2111): Dumping FAILED.
+[13:44:26]   dump failed -- that is this arm's result. cleaning up.
+[13:44:26]   tree still alive? yes   gpu=0, 74653 MiB 1, 4 MiB 
+[reaper] reaped orphan 25722
+/criu/scripts/criu-vllm-probe.sh: line 238: 25407 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" "${SLEEP_FLAG[@]}" "${EXTRA_VLLM[@]+${EXTRA_VLLM[@]}}" < /dev/null > "$LOG" 2>&1
+[13:44:31]   gpu after cleanup: 0, 0 MiB 1, 0 MiB 
+
+=== SUMMARY arm=live tp=1 ===================================
+boot to health_200 : 61.01s
+park               : 0
+criu dump          : FAILED in 34.20s (see /criu/img/vllm-tp1-live/dump.log)
+command terminated with exit code 3
+EXIT_CODE=3

@@ -1,0 +1,39 @@
+[reaper] subreaper armed, pid=64669
+======================================================================
+criu-vllm-probe  arm=live tp=1 model=Qwen/Qwen3-32B max-model-len=8192
+criu Version: 4.1.1   cc Version 580.105.08.
+image dir: /criu/img/vllm-tp1-live   log: /tmp/criu-vllm-tp1-live.log
+gpu at start: 0, 0 MiB 1, 0 MiB 
+container mem limit: unknown
+======================================================================
+[14:42:39] step 1: cold boot (this is the number the restore has to beat)
+[14:43:44]   health_200 at 64.55s   gpu=0, 74653 MiB 1, 4 MiB 
+[14:43:44]   baseline completion: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+[14:43:44]   tree: 64695(vllm) 65001(python3) 65002(VLLM::EngineCor) 
+[14:43:46]   pids holding /dev/nvidia*: 64695 65002 
+[14:43:46]   tree RSS before park: 4.12 GiB
+[14:43:46] step 2: no park -- dumping a live CUDA process on purpose
+[14:43:46]   tree RSS parked: 4.12 GiB   (this is the floor on image size)
+[14:43:46]     pid=64695 (vllm) rss=1.38 GiB nvidia_fds=11 cc_state=running
+[14:43:46]     pid=65001 (python3) rss=0.01 GiB nvidia_fds=0 cc_state=Error getting process state for process ID 65001: "initialization error"
+[14:43:46]     pid=65002 (VLLM::EngineCor) rss=2.73 GiB nvidia_fds=38 cc_state=running
+[14:43:46] step 3: criu dump the tree rooted at 64695
+[14:44:23]   criu dump rc=1 in 33.30s  image=1.12 GiB
+[14:44:23]   --- criu refused. error lines: ---
+      (00.272914) Error (cuda_plugin.c:222): cuda_plugin: Failed to launch cuda-checkpoint to retrieve restore tid: Could not find restore thread for process ID 65001
+      (00.550087) Error (cuda_plugin.c:222): cuda_plugin: Failed to launch cuda-checkpoint to retrieve restore tid: Could not find restore thread for process ID 65001
+      (22.477030) Error (criu/files-reg.c:1122): Can't create link remap for /dev/shm/sem.7R6Tks. Use link-remap option.
+      (22.477034) Error (criu/cr-dump.c:1570): Collect mappings (pid: 65002) failed with -1
+      (33.285463) Error (criu/cr-dump.c:2111): Dumping FAILED.
+[14:44:23]   dump failed -- that is this arm's result. cleaning up.
+[14:44:23]   tree still alive? yes   gpu=0, 74653 MiB 1, 4 MiB 
+[reaper] reaped orphan 65001
+[reaper] reaped orphan 65002
+/criu/scripts/criu-vllm-probe.sh: line 252: 64695 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" "${SLEEP_FLAG[@]}" "${EXTRA_VLLM[@]+${EXTRA_VLLM[@]}}" < /dev/null > "$LOG" 2>&1
+[14:44:28]   gpu after cleanup: 0, 0 MiB 1, 0 MiB 
+
+=== SUMMARY arm=live tp=1 ===================================
+boot to health_200 : 64.55s
+park               : 0
+criu dump          : FAILED in 33.30s (see /criu/img/vllm-tp1-live/dump.log)
+command terminated with exit code 3

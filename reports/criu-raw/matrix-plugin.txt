@@ -1,0 +1,72 @@
+[reaper] subreaper armed, pid=19334
+==================================================================
+CRIU x cuda-checkpoint matrix
+criu    : Version: 4.1.1
+cc      : Version 580.105.08.
+torch   : 2.13.0+cu130
+kernel  : 5.14.0-570.64.1.el9_6.x86_64
+caps    : 000001ffffffffff  seccomp=0
+gpu     : 0 MiB 0 MiB 
+arms    : plugin noplug
+==================================================================
+
+[13:33:28] ################ arm: plugin
+[13:33:28]   cuda-checkpoint visible: /usr/local/bin/cuda-checkpoint
+[13:33:28]   plugin dir: cuda_plugin.so 
+[13:33:30]   child pid=19382  rss=0.66 GiB  gpu=2773 MiB 4 MiB 
+[13:33:30]   /dev/nvidia* fds=36  nvidia maps=120
+[13:33:30]   cuda state=running
+[13:33:30]   NOT calling cuda-checkpoint by hand -- criu owns that decision now
+[reaper] reaped orphan 19382
+[13:33:33]     criu dump rc=0 in 3.16s  image=3.07 GiB (3297696387 B)
+[13:33:33]   process gone after dump? yes  gpu=0 MiB 0 MiB 
+[13:33:33]   plugin trace in dump.log:
+      (01.327652) Handling VMA with the following smaps entry: 7fd683184000-7fd6831d8000 r-xp 0000a000 103:08 3251128725                /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so
+      (01.327657) Handling VMA with the following smaps entry: 7fd6831d8000-7fd6831ee000 r--p 0005e000 103:08 3251128725                /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so
+      (01.327663) Handling VMA with the following smaps entry: 7fd6831ee000-7fd6831ef000 r--p 00074000 103:08 3251128725                /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so
+      (01.327680) Handling VMA with the following smaps entry: 7fd6831ef000-7fd6831f0000 rw-p 00075000 103:08 3251128725                /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so
+      (01.327690) Handling VMA with the following smaps entry: 7fd683216000-7fd68321a000 rw-p 00097000 103:08 3251128725                /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so
+      (01.330789) Dumping path for 1 fd via self 15 [/tmp/c_plugin.log]
+      (01.330793) Only file size could be stored for validation for file /tmp/c_plugin.log
+      (03.110821) cuda_plugin: finished cuda_plugin stage 0 err 0
+[13:33:36]     criu restore rc=0 in 2.68s
+[13:33:36]   restored pid=19382  state=running  gpu=2773 MiB 4 MiB   rss=0.46 GiB
+[13:33:36]   plugin trace in restore.log:
+      (00.097371) Collected [tmp/c_plugin.log] ID 0x50
+      (00.097387) unix:  `- Got id 0x57 ino 118031578 type SOCK_SEQPACKET state TCP_LISTEN peer 0 (name @cuda-uvmfd-4026557085-19382@ dir -)
+      (00.099492)  19382: File tmp/c_plugin.log could only be validated with file size
+      (00.107727)  19382: File usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so could only be validated with file size
+      (01.128929) plugin: `cuda_plugin' hook 9 -> 0x7ff3c1757ce3
+      (01.656279) cuda_plugin: resuming devices on pid 19382
+      (01.656298) cuda_plugin: Restore thread pid 19403 found for real pid 19382
+      (02.660639) cuda_plugin: finished cuda_plugin stage 2 err 0
+[reaper] reaped orphan 19382
+[13:33:37]   child output:
+      pre=3.0 cuda=True pid=19382 torch=2.13.0+cu130
+      post=3.0 (expect 3.0)
+      VERDICT: IDENTICAL
+
+[13:33:39] ################ arm: noplug
+[13:33:39]   cuda-checkpoint hidden: command -v -> 'NONE'
+[13:33:39]   plugin dir: cuda_plugin.so 
+[13:33:41]   child pid=19525  rss=0.66 GiB  gpu=2773 MiB 4 MiB 
+[13:33:41]   /dev/nvidia* fds=36  nvidia maps=120
+[13:33:42]   cuda state=running
+[13:33:42]   NOT calling cuda-checkpoint by hand -- criu owns that decision now
+[13:33:42]     criu dump rc=1 in 0.12s  image=0.00 GiB (135478 B)
+[13:33:42]     --- why it failed (criu log, error lines) ---
+      (00.104252) Error (criu/proc_parse.c:116): handle_device_vma plugin failed: No such file or directory
+      (00.104254) Error (criu/proc_parse.c:632): Can't handle non-regular mapping on 19525's map 200600000
+      (00.104263) Error (criu/cr-dump.c:1570): Collect mappings (pid: 19525) failed with -1
+      (00.104390) Error (criu/cr-dump.c:2111): Dumping FAILED.
+[reaper] reaped orphan 19525
+
+[13:33:44] done. gpu=0 MiB 0 MiB   images under /criu/img:
+  144K	/criu/img/noplug
+  3.1G	/criu/img/plugin
+  1.1G	/criu/img/vllm-tp1-ckpt
+  1.1M	/criu/img/vllm-tp1-live
+  1.2G	/criu/img/vllm-tp1-thin
+  12K	/criu/img/vllm-tp2-ckpt
+  308K	/criu/img/vllm-tp2-live
+EXIT: 0
