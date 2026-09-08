@@ -1,0 +1,16 @@
+=== criu-setup provenance (2026-09-08T17:41:12Z) ===
+host (pod)        : vllm-coldstart-b
+kernel             : 5.14.0-570.64.1.el9_6.x86_64
+criu version       : Version: 4.1.1
+criu path          : /usr/sbin/criu (never replaced by this script)
+plugin path        : /usr/lib/criu/cuda_plugin.so
+plugin size        : 49768 bytes
+plugin mode        : 755
+plugin mtime       : 2026-09-08 17:40:57.775273332 +0000
+plugin sha256      : adcffa579dfa2ce11cff25ba69bd8ddcb2b8a816050d808ba7462cc1892892db
+plugin source      : cache (/cache/criu-toolchain/criu4.1.1_driver580.105.08)
+cache key          : criu4.1.1_driver580.105.08
+cuda-checkpoint    : /usr/local/bin/cuda-checkpoint (already in image)
+cuda-checkpoint ver: Version 580.105.08.
+driver version     : 580.105.08
+verify (--verify)  : PASSED

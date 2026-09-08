@@ -1,0 +1,10 @@
+[17:31:39] arm=cold tp=1  gpu=0, 0 MiB 1, 0 MiB 
+[17:32:49]   cold boot -> health_200: 70.14s
+[17:32:50]   cold boot -> completion: 70.94s   out: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+
+=== MEASURE arm=cold tp=1 ==============================
+exec -> health_200   : 70.14s
+exec -> completion   : 70.94s
+completion           : ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+==========================================================
+criu-preboot.sh: line 99:  1289 Killed                  setsid vllm serve --model "$MODEL" --max-model-len "$MAXLEN" --tensor-parallel-size "$TP" --port "$PORT" < /dev/null > "$LOG" 2>&1

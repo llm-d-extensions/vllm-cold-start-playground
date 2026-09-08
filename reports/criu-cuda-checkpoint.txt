@@ -44,6 +44,11 @@ The short version, in five parts:
      and a privileged pod, because the single import that earns the 4s
      (vllm.entrypoints.openai.api_server, 3.5s) is also the one that opens 11
      /dev/nvidia* fds -- the prize and the price are the same import.
+     UPDATED 2026-09-08: the image is also cross-pod and cross-node portable, but
+     only if the criu toolchain is baked into the container image rather than
+     installed at runtime, and the win should be quoted as ~4s and no finer -- the
+     third significant figure does not reproduce on a shared node. See the
+     cross-pod section below.
 
 And one caveat that outranks item 2. Dumping a warmed engine REQUIRES criu's
 --link-remap (without it criu refuses outright: "Can't create link remap for
@@ -755,6 +760,112 @@ it ~0.8s. The --stage server row is the version that works: 4.07s at TP=1, with
 the accounting closing to 0.13s, and it needs cuda_plugin.so because the single
 import that earns the 4s is also the one that opens 11 /dev/nvidia* fds.
 
+------------------------------------------------------------------------------
+CROSS-POD PORTABILITY OF THE IMPORT-WARM IMAGE (2026-09-08)
+Answers the gap recommendation 2 named. Result: PORTABLE -- and the first attempt
+failed for a reason we caused ourselves.
+------------------------------------------------------------------------------
+The --stage server image was rebuilt in pod A (vllm-coldstart, pokprod-b93r39s1)
+onto the coldstart-cache PVC instead of node-local nvme, then pod A was deleted
+and a fresh pod restored the same image. Full evidence: crosspod-podb.txt.
+
+FIRST, the PVC cost, because putting the image somewhere a second pod can read it
+is a precondition for the whole question: +0.15s (+7.4%) on criu restore, 2.025s
+on nvme to 2.175s on GPFS. Zeroing the 4s win by I/O alone would need the PVC to
+deliver ~100-150 MB/s, about 6x below what GPFS gives a single stream here. The
+bandwidth and latency worries are both retired; the image is small enough not to
+care where it lives.
+
+THEN the restore failed, deterministically, 3/3 attempts, byte-identical on two
+different nodes, with cold-boot controls succeeding in the same pods and the
+image verified hash-identical 48/48 files across two RWO detach/reattach cycles:
+
+    Error (criu/files-reg.c:2153): File usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0
+                                   has bad build-ID
+    Error (criu/mem.c:1424): `- Can't open vma
+    Error (criu/cr-restore.c:2320): Restoring FAILED.
+
+That looks exactly like a structural limit on moving a criu image between pods,
+and it was written up as one -- attributed to mount-instance identity, the
+dev:inode pair of a mapped base-image file differing between pods. That diagnosis
+is WRONG, and reading criu's source is what killed it. validate_with_build_id()
+reads NT_GNU_BUILD_ID from the reopened fd and memcmp's it against the value
+stored at dump. It is a pure ELF-note content comparison: no st_dev, no st_ino,
+no mount identity anywhere in the path. And the mismatch branch is only reachable
+after a build-ID was read successfully, so byte-identical content cannot fail
+there. The error was telling the truth: that file really was a different file.
+
+It was. libblkid.so.1.1.0, build-ID as recorded in pod A's image:
+
+    30e34b89194ba6ce575055bc4fb954f4c1857475  pod A, at dump (crit decode)
+    1afaea6d6a83963f19829dd67efe817c95855146  pod B, live (libblkid1 2.39.3-9ubuntu6.5)
+
+Same container image, same digest, same lowerdir list -- different library.
+scripts/criu-setup.sh apt-installs the toolchain INTO THE RUNNING POD, and apt
+pulled libblkid1 forward to 2.39.3-9ubuntu6.6 in pod A's writable layer, which is
+ephemeral and per-pod. Pod B hit the PVC toolchain cache, took the fast path, and
+never ran those apt steps. Upgrading libblkid1 in pod B to the same candidate
+reproduced pod A's build-ID exactly, and the restore then succeeded 3/3 against
+pod A's original untouched image with no rebuild:
+
+    criu restore            rc=0, 1.83-1.87s
+    restore -> health_200   51.19-51.61s  (mean 51.44s, n=3)
+    correct completion text every arm, zero "Error (" lines, GPUs clean after each
+
+Pod A was on pokprod-b93r39s1 and this pod on pokprod-b93r43s3, so what is shown
+is cross-pod AND CROSS-NODE restore of an image whose producer no longer exists.
+
+So: the import-warm image IS portable, the failure was a harness artifact, and
+this is the FOURTH time in this project that an apparent platform limit turned out
+to be self-inflicted -- after the empty distro plugin directory, the missing
+__main__ guard, and the A2 bound computed from a build-time constant. Every one of
+them presented as a confident error message pointing at criu.
+
+THE DEPLOYMENT CONSEQUENCE, which holds regardless: installing the toolchain at
+runtime makes each pod's library set a function of when that pod happened to run
+setup, and a criu image can only restore where its mapped libraries are
+byte-identical. Those two facts together mean runtime apt installation cannot
+guarantee portability at all -- pod A and pod B were, by construction, different
+machines. The toolchain must be BAKED INTO THE CONTAINER IMAGE at build time.
+scripts/criu-setup.sh's own comments already anticipated this; the libblkid1 drift
+is the concrete proof. Note also that criu itself is pinned in that script
+(CRIU_PKG_VER, with a comment warning against relaxing it) and libblkid1 is not,
+which is the whole bug: pinning the thing you are thinking about is not enough
+when the image validates every library you map.
+
+LIMIT ON THE CLAIM. Driver 580.105.08 and kernel 5.14.0-570.64.1.el9_6.x86_64 are
+uniform across all 13 labeled H100 nodes on this cluster. So this demonstrates
+portability across a HOMOGENEOUS fleet and says nothing about driver skew, which
+was never testable here. A same-node arm was not repeated after the fix; it is the
+strictly weaker claim and is subsumed by the cross-node result.
+
+AND A CORRECTION TO THE 4.07s. On this pod the win against cache-warm cold
+controls is 4.66s (restore 51.44s mean n=3, cold 54.96s / 57.23s), which is the
+same effect and the same order, and it closes against its own bound: cold-3's log
+puts interpreter startup plus imports at ~7s (poller start 18:03:55, vLLM's first
+output 18:04:02), restore costs 1.85s, so the bound is ~5.2s and 4.66s sits inside
+it. It closes only in the mean, though. Per-arm the win is 3.52s against one cold
+control and 5.79s against the other, which straddles the bound -- against the
+slower control alone it would violate it. The cold arms are 2.27s apart across n=2
+-- roughly half the size of the effect -- the bound is itself only good to about
++/-1s because vLLM's log timestamps have 1-second resolution, and restore is not
+flat either: 56.16s has
+been seen where earlier arms gave 51.38s / 52.20s, so the earlier apparent
+flatness held at n=2 by chance. The 4.07s figure and its "accounting closes to
+0.13s" do NOT reproduce to that precision on a shared node. The lever is real and
+is about 4s; the third significant figure was never resolvable here.
+
+One number from this session is deliberately NOT reported as a win. The first cold
+arm in the fresh pod took 103.02s against 51.44s restored, which would read as
+~50%. It is a first-read page-cache miss on 61 GiB of weights, and the logs measure
+it rather than leaving it to inference: weight load 58.94s on that arm against
+27.08s on a later one, 31.86s of the 45.79s gap, same checkpoint and prefetch
+disabled in both. The import-warm image carries imports, not weights, and A2
+already measured weight load identical across arms; a cold boot's own second run
+recovers that time with no criu involved. Excluded on exactly the grounds this
+report already used for its own TP=1 r1 baseline (92.7s vs 58.0s/57.8s, weight load
+56.8s vs ~30.0s). Crediting it to the checkpoint would inflate a 4s lever by 12x.
+
 RECOMMENDATION, in order of confidence.
 
 1. DO NOT adopt the full-engine checkpoint for cold start. Not because it is slow
@@ -780,9 +891,25 @@ RECOMMENDATION, in order of confidence.
    free of the apparatus -- it needs cuda-checkpoint and cuda_plugin.so, therefore
    a privileged pod, because the one import worth prefetching is the one that
    touches the device. Weigh 4s against that, and note that the device-free
-   variant which would avoid it is worth only ~0.8s. Remaining work before
-   adoption: TP=2 repeats (n=1), and a restore into a DIFFERENT pod from the one
-   that built the image -- reuse is shown, cross-pod portability is not.
+   variant which would avoid it is worth only ~0.8s.
+
+   Cross-pod portability is now SHOWN, which is what this recommendation was
+   waiting on: the same image restored 3/3 into a pod on a different node after
+   its producer was deleted (2026-09-08 section above). It comes with one hard
+   precondition that changes how the artifact must be built. A criu image can only
+   restore where every library it maps is byte-identical, so the criu toolchain
+   has to be BAKED INTO THE CONTAINER IMAGE, not apt-installed into a running pod
+   -- runtime installation silently made pod A's and pod B's library sets differ
+   and the first three restore attempts failed hard because of it. Read
+   "one artifact per container image" literally: the artifact is only valid for
+   the exact image that produced it, and any layer change invalidates it.
+
+   Size the win at ~4s and not more precisely than that. 4.07s and 4.66s are the
+   same effect measured twice; the run-to-run band on a shared node is comparable
+   to the effect itself, so the "accounting closes to 0.13s" precision does not
+   reproduce. Remaining work before adoption: TP=2 repeats (n=1), a second model,
+   and driver-skew portability -- untestable on this cluster, every node is
+   identical.
 
 3. If a checkpoint is wanted for WARM STANDBY rather than cold start, the TP=1
    spawn result is a real capability and the numbers above are the right ones to
@@ -796,10 +923,14 @@ RECOMMENDATION, in order of confidence.
    plan that stacks "fork to skip re-imports" with "restore from a checkpoint" is
    stacking two levers that cannot both be pulled.
 
-WHAT WAS NOT MEASURED, stated so nobody reads it as measured: whether any of these
-images restores into a DIFFERENT pod than the one that dumped it (all reuse here is
-same-pod); whether shipping /dev/shm alongside the FULL-ENGINE image makes that one
-portable; whether spawn also unblocks TP=2 (expected not -- the wedge is in
+WHAT WAS NOT MEASURED, stated so nobody reads it as measured: whether the
+import-warm image survives DRIVER OR KERNEL SKEW -- cross-pod and cross-node
+restore is now shown, but every labeled H100 node on this cluster runs the same
+driver and kernel, so a heterogeneous fleet is untested and this is the gap that
+replaced the cross-pod one; whether the FULL-ENGINE image is portable at all
+(its blocker is --link-remap welding it to dump-time /dev/shm, a different
+mechanism from the build-ID validation that stopped the import-warm image, and
+shipping /dev/shm alongside it was not tried); whether spawn also unblocks TP=2 (expected not -- the wedge is in
 cuda-checkpoint, below vLLM); repeats on the --stage server TP=2 cell and on every
 --stage vllm cell; and a --stage server run against a second model, since the
 image is topology-agnostic but only one model was ever served from it.
@@ -822,4 +953,11 @@ vllm-tp{1,2}-live-plugin.txt        plugin installed, fork: dump refused / wedge
 vllm-tp1-live-spawn.txt             THE ROUND TRIP THAT WORKED
 vllm-tp1-live-spawn-ghost.txt       same arm without --link-remap: dump refused
 fd-forensics / fd-wall.txt          descriptor inventories
+crosspod-predictions.txt            predictions written before the cross-pod arms
+crosspod-poda.txt, -provenance,     pod A: image rebuilt onto the PVC, PVC-vs-nvme
+  -devices, -image-manifest.txt     restore cost, 48-file image hash manifest
+crosspod-podb.txt + b*-artifacts/   the cross-pod arms: three hard build-ID
+                                    failures, the refuted mount-identity
+                                    diagnosis, the libblkid1 root cause, and the
+                                    3/3 successful cross-node restore
 ==============================================================================

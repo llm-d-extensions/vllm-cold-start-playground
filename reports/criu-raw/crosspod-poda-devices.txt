@@ -1,0 +1,80 @@
+# crosspod-poda-devices.txt -- irreversible pre-deletion capture from pod A
+# captured: 2026-09-08T17:17:58Z (nvidia-smi timestamp), pod vllm-coldstart,
+# node pokprod-b93r39s1, immediately before pod A deletion. This state cannot
+# be recovered once pod A is gone -- it is the cross-pod baseline that pod B's
+# own device/mount/pid capture is diffed against.
+
+=== hostname ===
+vllm-coldstart
+(pod name == container hostname; default k8s behavior, not overridden)
+
+=== ls -l /dev/nvidia* (major:minor) ===
+crw-rw-rw-. 1 root root 195, 254  /dev/nvidia-modeset
+crw-rw-rw-. 1 root root 503,   0  /dev/nvidia-uvm
+crw-rw-rw-. 1 root root 503,   1  /dev/nvidia-uvm-tools
+crw-rw-rw-. 1 root root 195,   0  /dev/nvidia0
+crw-rw-rw-. 1 root root 195,   4  /dev/nvidia4
+crw-rw-rw-. 1 root root 195, 255  /dev/nvidiactl
+/dev/nvidia-caps/nvidia-cap1: cr--------. 1 root root 506, 1
+/dev/nvidia-caps/nvidia-cap2: cr--r--r--. 1 root root 506, 2
+
+Note: nvidia0 has minor 0, nvidia4 has minor 4 -- these are the two
+physical GPUs assigned to this pod (2 of the node's 6), not necessarily
+0/1. Minor number is host-wide, not pod-relative. /dev/nvidia-uvm is
+503,0 here; per the predictions doc this is the single least-predictable
+number across nodes (assigned at driver-module load time) -- this is
+the exact number B2 must be diffed against.
+
+=== nvidia-smi -q head -40 ===
+Timestamp                : Tue Sep  8 17:17:58 2026
+Driver Version            : 580.105.08
+CUDA Version              : 13.0
+Attached GPUs             : 2
+
+GPU 00000000:18:00.0
+  Product Name            : NVIDIA H100 80GB HBM3
+  GPU UUID                 : GPU-a03ba92b-28df-07c5-63c2-0580029282cd
+  Minor Number              : 0
+  Persistence Mode          : Enabled
+  MIG Mode                  : Disabled
+
+GPU 00000000:9A:00.0
+  GPU UUID                  : GPU-f2be4d53-4f5f-6afe-1092-718e50133677
+  Minor Number               : 4
+
+=== mount table (from /proc/self/mountinfo, filtered to load-bearing paths) ===
+mountID parentID major:minor root                          mountpoint  fstype        source
+29796   24316    0:808        /                             /           overlay       container rootfs (overlay, per-pod, always fresh)
+29797   29796    0:781        /pvc-85ecef33-.../...-data     /cache      gpfs          pvc-85ecef33-b1d2-4110-8eab-d818b925b18b (coldstart-cache PVC)
+29798   29796    259:8        /ostree/.../criu (emptydir)     /criu       xfs           /dev/nvme0n1p4 (node-local nvme, dies with pod)
+29804   29799    0:794        /                              /dev/shm    tmpfs         size=16777216k (16Gi emptyDir:Memory, dies with pod)
+
+Key point for the mount-instance-identity risk (predictions.txt sec 4,
+top-ranked untested risk): /cache is mount ID 29797 in THIS pod's mount
+namespace, backed by GPFS fileset pvc-85ecef33-b1d2-4110-8eab-d818b925b18b.
+Pod B will get a NEW mount ID (fresh mount instance, fresh mount
+namespace) for the SAME underlying fileset once the PVC is rebound
+RWO. Path string ("/cache") is identical; mount instance is not. This
+is exactly the variable under test.
+
+=== dumped process pid (from image directory, crit unavailable) ===
+`crit` binary is NOT installed in this container (`bash: line 9: crit:
+command not found`), so pstree.img/inventory.img could not be decoded
+directly -- this is itself a minor finding (crit-based introspection is
+unavailable in this image; pid recovery had to fall back to filenames).
+Root dumped pid recovered from single-instance-per-pid image files:
+  fs-26297.img, ids-26297.img, mm-26297.img  -> root pid = 26297
+Thread/subprocess core-*.img files span pids 26297,26300-26314,26318,
+26328-26342 (31 total, non-contiguous -- consistent with torch/vllm
+worker threads, not separate processes). Matches
+crosspod-image-manifest.txt file list and pod A's own build log
+("preload ready pid=26297") exactly.
+
+=== pre-deletion hash re-verification ===
+sha256sum -c against crosspod-image-manifest.txt, run from inside pod A,
+immediately after this capture, immediately before deletion:
+  48/48 files: OK
+  SHA256_EXIT=0
+This is the LAST verification of these bytes from the pod that wrote
+them. Pod B's own re-verification (post-attach, pre-restore) is the
+comparison point that proves no silent rebuild occurred.

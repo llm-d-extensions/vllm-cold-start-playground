@@ -1,0 +1,485 @@
+==============================================================================
+CROSS-POD PRE-REGISTRATION -- can the 0.59 GiB --stage server image restore
+into a pod other than the one that built it? Written before any arm runs.
+==============================================================================
+scope: read-only recon only (kubectl get/describe). No pod created, no file
+in the repo touched except this one. Every claim below is tagged:
+  MEASURED -- a read-only command was run here; the command and output are
+              quoted or paraphrased with enough detail to rerun it.
+  READ     -- found verbatim in the repo, cited file:line.
+  INFERRED -- reasoning from the above, no direct evidence. Never treat as
+              a result.
+
+------------------------------------------------------------------------------
+1. PRIOR ART IN THIS REPO
+------------------------------------------------------------------------------
+scripts/cuda-checkpoint-cross-gpu.sh and scripts/vllm-cross-gpu-restore.sh
+exist and were run (READ, both files' own header comments record measured
+results dated 2026-09-02). They answer a DIFFERENT question than the one
+this round asks, and the difference matters more than the surface
+similarity ("restore onto other hardware").
+
+What they establish (READ, cuda-checkpoint-cross-gpu.sh:1-31 and
+docs/sleep-mode.md:394-465):
+  * cuda-checkpoint's own --action restore --device-map flag can move a
+    LIVE process's GPU context from one physical card to another, in
+    2.67s (micro-probe) to 4.13s (real Qwen3-32B EngineCore, sleep+
+    checkpoint+remap+wake), with byte-identical output after the move.
+  * Three preconditions, all load-bearing: the device map must list EVERY
+    GPU visible to the process, not just the ones holding contexts; the
+    map must be a bijection; the target GPU must be visible to the
+    process. Consequence: CUDA_VISIBLE_DEVICES=0 (the default k8s
+    one-GPU-per-pod shape) makes the whole technique unavailable
+    (docs/sleep-mode.md:433-436).
+  * The mechanism is NOT serialization. cuda-checkpoint's entire interface
+    is keyed on a live pid (--get-state/--action .../--pid); there is no
+    save/output path at all. docs/sleep-mode.md:566-586, quoting the
+    binary's own option list, concludes explicitly: "cuda-checkpoint has
+    no serialization, by design ... There is no way to hand it bytes."
+    The process that was checkpointed is the only process that can be
+    restored -- it never leaves the pid, and therefore never leaves the
+    pod, in either script.
+
+Why this is the most important finding of this recon, stated plainly: the
+cross-GPU prior art is not a weaker or partial version of cross-pod CRIU
+restore. It is a mechanistically unrelated technique (in-place device
+remap of a still-running process) that this repo already proved CANNOT be
+extended to disk serialization -- CRIU is named explicitly as the only
+thing that does that job (docs/sleep-mode.md:610-611, "The only thing that
+does that job is CRIU"). So: THERE IS NO PRIOR ART IN THIS REPO for
+restoring any checkpoint image, cuda-checkpoint-based or CRIU-based, into
+a different process/pod than the one that produced it. The cross-GPU
+scripts test a different axis (which physical card) while holding the
+pod/process fixed; this round's B1/B2 arms test the axis the cross-GPU
+work never touched (which pod/process) while mostly holding the card
+fixed. reports/criu-cuda-checkpoint.txt:799-801 says this outright: "all
+reuse here is same-pod."
+
+One piece of the cross-GPU work DOES transfer by analogy, as a warning
+rather than a result. docs/sleep-mode.md:704-711 ("The image is welded to
+its environment") states that a live cuda-checkpoint snapshot is only
+valid for the same driver version, same GPU model, same CUDA libraries
+and same vLLM flags -- change any one and the image is void. That
+argument is about the CUDA-context bytes cuda-checkpoint moves, which are
+the same bytes the CRIU cuda_plugin.so calls cuda-checkpoint to move
+(reports/criu-cuda-checkpoint.txt:78-96). So the "welded to environment"
+claim likely generalizes to the CRIU image too, but nobody has tested a
+CRIU restore against a differing driver/GPU/CUDA-lib environment either.
+INFERRED, not measured, and flagged as such in section 2 below, where the
+one variable in that list (driver version) is checked directly.
+
+------------------------------------------------------------------------------
+2. DRIVER AND KERNEL HOMOGENEITY ACROSS NODES
+------------------------------------------------------------------------------
+MEASURED, `kubectl get nodes -o json` read into a table (node label
+nvidia.com/cuda.driver-version.full, feature.node.kubernetes.io/
+kernel-version.full, nvidia.com/gpu.product; usage from `kubectl get pods
+-A -o json` summed by nodeName and nvidia.com/gpu request, phase Running/
+Pending only):
+
+  node              cap alloc used free  product          driver      kernel
+  --------------    --- ----- ---- ----  ---------------  ----------  ----------------------------
+  pokprod-b93r38s0    7    7    2    5   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r38s1    4    3    2    1   (no gpu.product/driver label -- see note below)
+  pokprod-b93r38s2    7    7    6    1   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r38s3    5    5    3    2   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r39s0    8    8    7    1   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r39s1    6    6    3    3   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64  <- build node
+  pokprod-b93r39s2    8    8    0    8   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r43s0    7    7    4    3   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r43s1    8    8    8    0   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r43s2    8    8    7    1   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r43s3    6    6    0    6   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r44s0    7    7    4    3   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r44s1    7    7    6    1   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+  pokprod-b93r44s2    7    7    7    0   H100-80GB-HBM3   580.105.08  5.14.0-570.64.1.el9_6.x86_64
+
+VERDICT: every node that carries the driver label reports driver
+580.105.08 and kernel 5.14.0-570.64.1.el9_6.x86_64 -- IDENTICAL to
+pokprod-b93r39s1 (reports/criu-raw/environment.txt:4-11) on both axes.
+A genuine cross-node DRIVER-mismatch test is NOT AVAILABLE on this
+cluster right now: there is no second driver version to restore against.
+B2 therefore tests "different physical GPU card, identical driver and
+kernel," not the fuller "different driver" risk the report's welded-to-
+environment argument warns about. That fuller risk stays untested either
+way.
+
+pokprod-b93r38s1 is the one exception: it reports the matching kernel but
+carries no nvidia.com/gpu.product or nvidia.com/cuda.driver-version.full
+label at all, with only 4 GPU capacity. MEASURED but unexplained from
+read-only recon (gpu-feature-discovery may not have completed on it, or
+it may be a different GPU model); excluded as a candidate on that basis,
+not selected for or against.
+
+CORRECTION TO THE TASK'S STATED PREMISE. The premise given for this recon
+was "pokprod-b93r39s1 currently shows 6 of 8 GPUs allocatable." MEASURED,
+via `kubectl describe node pokprod-b93r39s1`: Capacity and Allocatable for
+nvidia.com/gpu are both 6, not 8 (nvidia.com/gpu.count=6 label confirms
+it), and the allocated-resources table shows nvidia.com/gpu requests=3,
+limits=3 -- i.e. 3 of 6 in use, 3 free, not "2 of 8." The node has 6
+physical GPUs, not 8; the assumption behind the "2 may already be in use"
+framing was a wrong node-capacity number, though the qualitative point
+(some GPUs on the build node are in use by other tenants) is correct: the
+running pods there include glimmer-vllm and kahila-bench workloads each
+holding 1 GPU (MEASURED, `kubectl get pods -A -o wide` filtered to
+nodeName=pokprod-b93r39s1), among others.
+
+B1 candidate (same node): pokprod-b93r39s1 itself, 3 free of 6 -- enough
+for a TP=1 (1 GPU) or TP=2 (2 GPU) restore alongside the existing tenants,
+same driver/kernel by construction (it is the build node).
+
+B2 candidates (different node, driver+kernel identical, most headroom):
+pokprod-b93r39s2 (0 used, 8 free) and pokprod-b93r43s3 (0 used, 6 free).
+Neither is running the model already, so no scheduling conflict is
+expected for a single-GPU or two-GPU pod. Selection here is NOT a
+commitment -- node occupancy is a snapshot, MEASURED at report time, and
+should be re-checked immediately before B2 runs, not read as this file's
+final answer.
+
+------------------------------------------------------------------------------
+3. PVC CONSTRAINTS
+------------------------------------------------------------------------------
+MEASURED, `kubectl get pvc coldstart-cache -n lionel-cold-start -o json`
+and `kubectl get pv <bound-pv> -o json` and `kubectl get storageclass
+ibm-spectrum-scale-fileset -o yaml` and `kubectl get csidriver
+spectrumscale.csi.ibm.com -o yaml`:
+  accessModes: [ReadWriteOnce], capacity 200Gi, phase Bound.
+  storageClassName: ibm-spectrum-scale-fileset, provisioner
+    spectrumscale.csi.ibm.com, parameters {shared: "true",
+    volBackendFs: remote-filesystem-fs-ec}, volumeBindingMode: Immediate.
+  CSIDriver: attachRequired=true, fsGroupPolicy=ReadWriteOnceWithFSType,
+    storageCapacity=false.
+  PV backend: fsType gpfs, volumeHandle path under
+    /mnt/remote-filesystem-fs-ec/primary-fileset-.../.volumes/<pv>.
+  No pod in namespace lionel-cold-start is currently running (`kubectl get
+    pods -n lionel-cold-start` -> No resources found), so no
+    VolumeAttachment currently holds this PV to any node.
+
+VERDICT on the RWO question. attachRequired=true means the k8s
+attach/detach controller manages a VolumeAttachment object per PV, and
+standard k8s semantics for that (not a Spectrum Scale property) is: one
+node holds the attachment at a time under RWO, and a NEW attachment (to a
+different node) is granted only after the previous one is released, which
+happens automatically when the pod that held it terminates. This is
+SEQUENTIAL, exactly the shape the task describes as fine ("not
+simultaneous"), and it is a k8s/CSI-driver policy layered on top of a
+filesystem that is explicitly self-described as shared ("shared": "true"
+in the StorageClass parameters, and GPFS/Spectrum Scale is a parallel
+cluster filesystem mountable from many nodes at once by design) --
+consistent with the task's expectation that the RWO restriction here is
+enforced by the CSI driver/k8s, not by the underlying physics. This is
+INFERRED from the CSIDriver spec and general k8s attach/detach behavior,
+not measured directly: no attach/detach cycle was exercised in this
+recon (that would require creating and deleting a pod, which is out of
+scope), so the actual wall-clock cost of a detach-then-reattach on a
+DIFFERENT node is unmeasured and could add latency neither A2 nor B1 will
+show.
+
+Free space: NOT independently measured here (no running pod to `df` from,
+and exec is out of scope for this recon). READ, reports/loader-comparison-
+32b.txt:7, a past session recorded "gpfs on /cache (remote-filesystem-fs-
+ec), 136 GiB free" against the same 200Gi PVC -- dated, not current, and
+irrelevant in practice: the image this round cares about is 0.59 GiB,
+three orders of magnitude under any plausible free-space figure on this
+PVC, so capacity is not a real constraint for A2/B1/B2 regardless of its
+exact current value.
+
+Throughput: READ, two independent measurements exist on this same
+GPFS-backed cache volume, at different concurrency and different access
+pattern, and they disagree by >10x:
+  * docs/sleep-mode.md:652-655 -- single-stream dd, O_DIRECT-adjacent
+    (unspecified block size, plain `dd`), 4.3 GB in 5.00s = 859 MB/s.
+  * docs/experiments.md:557-563 -- true O_DIRECT reads of the 61.02 GiB
+    Qwen3-32B checkpoint at increasing thread count: 1.15 / 4.12 / 7.79 /
+    9.30 GiB/s at 1/4/8/16 threads. Single-thread O_DIRECT (1.15 GiB/s =
+    1177 MB/s) is close to but faster than the plain-dd figure; the gap
+    to 9.30 GiB/s is entirely read concurrency, not the device.
+  Neither measurement is criu's own access pattern (page-file reads
+  during `criu restore`), so which of these numbers actually applies to
+  A2/B1/B2 is INFERRED, not measured -- see section 5's use of the
+  conservative single-stream figure and why.
+
+------------------------------------------------------------------------------
+4. WHAT IN THE IMAGE IS POD-SPECIFIC
+------------------------------------------------------------------------------
+READ, scripts/criu-preboot.sh in full. The report's claim (reports/criu-
+cuda-checkpoint.txt:685-686) that the only out-of-image dependency is "two
+ordinary log files whose dump-time sizes are recorded in filesizes.txt"
+checks out against the script for THOSE two files, but the script depends
+on more state than that sentence names once every path is walked:
+
+  /tmp/preboot.log (LOG) and /tmp/preboot.out (OUT) -- CONFIRMED the two
+    files in filesizes.txt (criu-preboot.sh:284-286: `stat -c "%s %n"`
+    on exactly $LOG and $OUT). Both are opened as regular files with an
+    open fd at dump time (LOG via shell stdout redirection, OUT via the
+    child's own `open(outf,"a",buffering=1)`, criu-preboot.sh:171), so
+    criu's regular-file-by-size validation applies to both, and the
+    measure path recreates and truncates them to the recorded size
+    before restore (criu-preboot.sh:322-326). A fresh pod's /tmp starts
+    empty; the script's own truncate step is what supplies these files,
+    not anything the pod ships with -- so this dependency is HANDLED by
+    the script, not absent, and it is handled identically regardless of
+    which pod runs --measure, since the truncate step only reads
+    $IMG/filesizes.txt and writes to $LOG/$OUT paths that exist in every
+    pod built from this manifest.
+
+  /tmp/preboot.ready (RDY) -- NOT in filesizes.txt and NOT reopened by
+    the measure path. READ: the child writes it with `open(rdy,
+    "w").write(str(pid))` (criu-preboot.sh:212) as a single statement
+    with no held reference, so CPython closes the fd immediately; by the
+    time criu dumps the process it is executing the polling loop two
+    lines later (criu-preboot.sh:213-216) and holds no open fd on RDY.
+    Criu's restore resumes exactly at that polling loop, which checks
+    only for GO's existence, never rereads RDY. So RDY is real
+    out-of-image state (a file on disk the report's sentence does not
+    mention) but INFERRED to be harmless: nothing in the restored
+    process's control flow looks at it again. A fresh pod would not have
+    this file and nothing in the script creates it before --measure,
+    which is consistent with the sentence's practical conclusion even
+    though the file itself is real.
+
+  /tmp/preboot.argv (ARGS) -- NOT in filesizes.txt, but IS created fresh
+    by --measure itself before restore, for every arm and every pod
+    (criu-preboot.sh:300, unconditional at the top of the `measure)`
+    case). Not a hidden dependency: the script supplies it every time,
+    so a fresh pod has it as reliably as the build pod did.
+
+  pids criu reclaims -- READ, scripts/criu-reaper.py:1-25: criu restores
+    a dumped tree at the SAME pids via clone3(set_tid), and the risk
+    named there is a target pid already held by a zombie (pid 1 in this
+    container is `sleep infinity`, which never reaps, so orphans
+    normally wedge on pid 1 forever without the subreaper). The build-
+    server dump landed the single preload process at pid 67445
+    (reports/criu-raw/preboot-build-server.txt:3) -- a HIGH pid,
+    implying many prior exec sessions had already run in that pod. A
+    genuinely fresh pod's pid counter starts near 1 (pid 1 is the
+    container's own `sleep infinity`; the first `kubectl exec` lands in
+    the low single/double digits). INFERRED: a fresh pod is therefore
+    LESS likely to have pid 67445 occupied than a long-lived pod is,
+    because nothing has run there yet to claim it -- the zombie-pid risk
+    scripts/criu-reaper.py exists to manage is, if anything, lower in
+    B1/B2 than it was in any of the same-pod repeat restores already
+    measured. Not verified: whether clone3(set_tid=67445) succeeds
+    cleanly at an arbitrarily high, never-before-used pid in a fresh pid
+    namespace has not been tested here, only reasoned about.
+
+  cgroup layout -- READ, --manage-cgroups=ignore is passed identically at
+    both dump and restore (criu-preboot.sh:274, 330). This tells criu not
+    to attempt to recreate the dumped cgroup path, so whatever cgroup the
+    kubelet places the fresh pod's process in should be used as-is.
+    INFERRED low risk: this flag exists precisely to make cgroup
+    placement pod-agnostic, and no cgroup-related error has appeared in
+    any arm to date (including the three same-pod stage-server repeats).
+
+  /dev/shm -- READ, reports/criu-raw/environment.txt:168-171: the
+    stage-server dump log shows "Will allow link remaps on FS" with NO
+    deleted/unlinked file lines, unlike the full-engine image which
+    depends on a dump-time /dev/shm semaphore link (reports/criu-cuda-
+    checkpoint.txt:448-451). Because this image is taken BEFORE engine
+    construction, vLLM's multiprocessing code (which is what unlinks
+    /dev/shm semaphores) has not run yet. INFERRED, consistent with the
+    report's claim: this image should have no /dev/shm content
+    dependency, only the mount existing at all -- which every pod built
+    from manifests/pod-exec-criu.yaml has, as its own fresh 16Gi
+    Memory-medium emptyDir (manifests/pod-exec-criu.yaml:247-251),
+    identical in path and size, empty in content, in every pod.
+
+  mount namespace / mount paths -- READ, manifests/pod-exec-criu.yaml
+    volumes: /cache (PVC), /criu (emptyDir), /dev/shm (emptyDir Memory),
+    /opt/coldstart-src (configmap), /var/log/coldstart (emptyDir). Every
+    pod built from this manifest gets the SAME mountpoint paths. What
+    differs pod-to-pod is the underlying volume INSTANCE: /criu and
+    /dev/shm are fresh emptyDirs each time (new mount ids), and even
+    /cache, though it is the same PVC, is a new bind-mount instance
+    established by a new NodeStageVolume/NodePublishVolume call. Whether
+    criu's restore-time mount validation cares about matching mount-ID
+    identity, or only about matching paths+fstype+options, is NOT
+    established anywhere in this repo -- every same-pod restore to date
+    reused the literal mount instances from dump time, so this specific
+    question has never been exercised. INFERRED risk, genuinely open in
+    either direction; flagged as the most mechanically plausible source
+    of a cross-pod-specific failure that would not occur in a same-pod
+    A2 arm.
+
+    Note also: for B1/B2 the image cannot live on /criu at all, since
+    that emptyDir does not survive pod deletion -- it must be staged on
+    /cache (the PVC) beforehand, which is exactly what A2/B1/B2 as
+    specified require and is consistent with the task's framing.
+
+  hostname/UTS -- READ, manifests/pod-exec-criu.yaml:1-15 states the pod
+    name is deliberately always `vllm-coldstart` and that "applying one
+    [manifest] replaces the other" -- i.e. the standard workflow here is
+    delete-and-reapply the SAME pod name, not a uniquely-named
+    replacement pod. Kubernetes sets the container hostname to the pod
+    name by default when no explicit hostname/subdomain is set (none is
+    set here). INFERRED consequence, favorable: as long as B1/B2 recreate
+    the pod under the identical name `vllm-coldstart` (the normal way
+    this repo already operates), the hostname a fresh pod presents is
+    BYTE-IDENTICAL to pod A's, removing what would otherwise be a live
+    cross-pod risk. This mitigation is contingent on that operational
+    choice being followed for the experiment; a uniquely-named pod B
+    would reopen it.
+
+  /dev/nvidia* fds and device numbers -- READ, the stage-server image
+    carries 11 nvidia fds opened by one CUDA-touching import (reports/
+    criu-cuda-checkpoint.txt:654-663). /dev/nvidiactl and /dev/nvidiaN
+    are commonly assigned a fixed kernel-registered major (195) that is
+    stable per driver family, which is INFERRED general knowledge, not
+    something measured in this repo. /dev/nvidia-uvm and /dev/nvidia-uvm-
+    tools are typically registered as dynamically-numbered misc character
+    devices at driver-module load time, meaning their major:minor CAN
+    legitimately differ from host to host even under an IDENTICAL driver
+    version, purely as a function of module-load order on that specific
+    boot. Nothing in this repo's fd-forensics output (reports/criu-raw/
+    fd-wall.txt) records the exact major:minor of any nvidia-uvm fd, so
+    this cannot be checked from repo data. Whether cuda_plugin.so's
+    ext-file/device-vma hooks restore these fds by re-opening the named
+    device on the target host (immune to a numbering difference) or by
+    validating the recorded device number against the live one (not
+    immune) is UNVERIFIED either way -- this is the single least-
+    understood mechanical risk specific to B2 (different node) that does
+    not apply to A2 or B1 (same node, so by definition same device
+    numbering as at dump time).
+
+  HF cache path -- READ, manifests/pod-exec-criu.yaml:56-60: HF_HOME,
+    HF_HUB_CACHE etc. all point under /cache (the PVC), which is mounted
+    at the same path in every pod from this manifest. The stage-server
+    image never touches the model (dump happens before engine
+    construction, reports/criu-cuda-checkpoint.txt:576-589), so this
+    dependency is inert for THIS image specifically, though it will
+    matter the moment `vllm serve` actually runs post-restore and reads
+    weights -- unchanged by which pod restores the image, since /cache
+    is the same PVC everywhere.
+
+Net correction to the report's sentence: it is accurate about what the
+image FILE needs (two log files, both handled), but incomplete as a full
+list of pod-external state the RESTORE as scripted depends on. The two
+items with real, unquantified risk are the mount-instance-identity
+question (mount namespace) and the /dev/nvidia-uvm numbering question
+(device identity) -- both genuinely untested, in either direction, by
+anything in this repo.
+
+------------------------------------------------------------------------------
+5. PREDICTED OUTCOME
+------------------------------------------------------------------------------
+Baseline constants used (all READ, reports/criu-cuda-checkpoint.txt and
+reports/criu-raw/environment.txt): image 0.59 GiB; imports carried
+C = 6.25s; nvme restore R_nvme = 2.31s mean (TP=1: 2.27s, 2.34s; TP=2:
+2.31s); nvme read 3900 MB/s (environment.txt:46) / 3.63 GiB/s sustained
+(predictions.txt:6); TP=1 cold mean 54.72s (n=2); TP=1 restore mean
+50.65s (n=2); measured win 4.07s; the report's own bound win = C - R,
+which closed to within 0.13s on the nvme arm (reports/criu-cuda-
+checkpoint.txt:630-636).
+
+Decomposing R_nvme (INFERRED split, not separately measured): at 3900
+MB/s the 0.59 GiB image itself reads in ~0.155s; the remaining ~2.155s of
+R_nvme is cuda_plugin/cuda-checkpoint's device-side resume, which the
+restore.log timestamps support -- "cuda_plugin: finished cuda_plugin
+stage 2" lands at +2.319s from restore start (reports/criu-raw/
+environment.txt region for --stage server), essentially the whole
+measured restore time. This split matters because it says the ~2.3s
+restore cost is DOMINATED by device resume, not by disk I/O -- so
+changing storage tier should move R by roughly the disk-read delta only,
+not by anything close to a full re-scaling of the 2.3s.
+
+A2 -- same pod, image on the PVC (isolates storage cost).
+  Mechanism: only the disk-read leg changes; process/pod context is
+  identical to every same-pod arm already measured, so no NEW mechanism
+  is under test here, only a substitution of read source.
+  Prediction, using the single-stream GPFS figure (859 MB/s, docs/sleep-
+  mode.md:652-655) as the conservative estimate for criu's own (likely
+  single-stream) image read:
+    disk-read component: 0.59 GiB / 859 MB/s ~= 0.70s
+    predicted restore   : 2.155 + 0.70 ~= 2.86s   (range 2.3-3.1s,
+                           depending on whether criu's read pattern is
+                           closer to the single-stream or the multi-
+                           thread O_DIRECT figure, and on GPFS open/
+                           metadata latency for a file this small, which
+                           neither throughput number captures)
+    predicted win        : C - R = 6.25 - 2.86 ~= 3.4s   (~6.2%)
+    predicted health_200 : cold(54.72) - win ~= 51.3s
+  Falsifiable failure, if wrong: NOT a hard failure (nothing about this
+  arm changes pod/process/device state), so the specific error to expect
+  if the mechanism above is wrong would be a criu-level mmap/read error
+  on a GPFS-backed image file (GPFS's mmap semantics differ from tmpfs/
+  ext4/nvme; if criu memory-maps image files rather than read()-ing them,
+  this is the one path that could turn a slowdown into an outright
+  restore failure rather than a smaller win). No such error has ever been
+  observed in this repo because no arm has put an image on GPFS before.
+
+B1 -- fresh pod, SAME node, image on the PVC (isolates "different pod").
+  Mechanism: A2's storage substitution, PLUS a fresh pid namespace/mount-
+  instance/cgroup context, on the SAME physical GPUs and SAME kernel/
+  driver instance (literally the same host).
+  Prediction: SUCCESS, at the same cost as A2 -- restore ~2.86s, win
+  ~3.4s, health_200 ~51.3s -- conditional on the pod being recreated
+  under the identical name `vllm-coldstart` per the manifest's own stated
+  convention (section 4), which removes the hostname/UTS variable, and
+  conditional on the mount-instance-identity question in section 4 not
+  mattering in practice (untested either way).
+  Falsifiable failure, if wrong: a criu restore error naming a specific
+  mount point (/cache or /criu) or a "bad size"/"file changed" complaint
+  about /tmp/preboot.log or /tmp/preboot.out despite the script's
+  truncate step (would indicate the two-file dependency is less complete
+  than section 4's reading of the script suggests), OR, at the harder
+  end, a files-reg.c-style "Can't link .../No such file or directory"
+  error of the same SHAPE as the full-engine image's link-remap failure
+  (reports/criu-cuda-checkpoint.txt:436-440) if some as-yet-unidentified
+  piece of /dev/shm or /tmp state turns out to be load-bearing after all.
+
+B2 -- fresh pod, DIFFERENT node, image on the PVC (the full portability
+claim).
+  Mechanism: everything in B1, plus a different physical GPU card behind
+  an IDENTICAL driver and kernel version (section 2: no driver mismatch
+  is available to test on this cluster today), plus the untested /dev/
+  nvidia-uvm device-numbering question from section 4, which is the one
+  variable that genuinely distinguishes B2 from B1 mechanically.
+  Prediction: SUCCESS at the same cost as B1 -- restore ~2.86s, win
+  ~3.4s, health_200 ~51.3s -- IS THE CENTRAL-CASE PREDICTION, because the
+  driver/kernel homogeneity measured in section 2 removes the risk this
+  arm was designed to probe hardest. The prediction carries materially
+  LOWER confidence than A2/B1's, not because the number should differ,
+  but because the one variable that could make it differ (device
+  numbering across hosts) is not assessable from read-only recon.
+  Falsifiable failure, if wrong: a cuda_plugin/criu error citing a
+  specific /dev/nvidia* character device by number, structurally similar
+  to "Can't dump file 9 of that type (chr 195:255)" from the full-engine
+  BLOCKER 1 (reports/criu-cuda-checkpoint.txt:250-253) but on RESTORE
+  rather than dump, and about a number MISMATCH rather than an unhandled
+  fd type. That specific signature would be the first direct evidence
+  either way on the "welded to its environment" question from section 1.
+
+WHAT PVC READ RATE WOULD ZERO THE WIN, quantified from the report's own
+identity (win = C - R, reports/criu-cuda-checkpoint.txt:635-636).
+  Win reaches zero when R = C = 6.25s. The device-resume floor is fixed
+  at ~2.155s regardless of storage (it is not a disk operation), so the
+  disk-read leg would have to grow to 6.25 - 2.155 = 4.095s for the whole
+  image, i.e. a sustained rate of 0.59 GiB / 4.095s ~= 0.144 GiB/s ~=
+  148 MB/s.
+  That threshold is ~26x below the nvme's measured 3900 MB/s and ~5.8x
+  below GPFS's own measured single-stream figure of 859 MB/s (docs/sleep-
+  mode.md:652-655) -- i.e. even the slowest access pattern for this
+  filesystem measured anywhere in this repo is comfortably above the
+  rate that would erase the win from throughput alone. The more
+  plausible way the win actually shrinks toward zero is NOT raw
+  throughput but fixed per-request latency on a network filesystem
+  (metadata lookups, lock acquisition, first-open cost) for a file this
+  small, which none of the throughput numbers in this repo capture and
+  which only running A2 will reveal.
+
+SUMMARY TABLE (all predictions, none measured yet)
+
+  arm   restore   health_200   win     confidence
+  ----  --------  -----------  ------  ------------------------------
+  A2    ~2.86s    ~51.3s       ~3.4s   high (no new mechanism)
+  B1    ~2.86s    ~51.3s       ~3.4s   medium (pid/mount/cgroup, new)
+  B2    ~2.86s    ~51.3s       ~3.4s   low-medium (+ device numbering,
+                                        wholly unverifiable from recon)
+
+The number is predicted NOT to move much across A2/B1/B2, because nothing
+in the accounting identity depends on which pod or node performs the
+restore -- only WHETHER it succeeds does. That is the actual thing this
+round of arms should be run to learn: not a magnitude, but a yes/no per
+arm, with the number serving mainly as a sanity check that a "yes" is a
+real restore and not a fluke.
+==============================================================================

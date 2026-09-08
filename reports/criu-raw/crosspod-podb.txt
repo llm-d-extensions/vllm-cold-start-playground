@@ -1,0 +1,685 @@
+==============================================================================
+CROSS-POD ARM B (pods B1, B2) -- restore pod A's `--stage server` CRIU image
+(dumped 2026-09-08T16:27:13Z, 48 files, 637387847 bytes, on PVC
+coldstart-cache) into a DIFFERENT pod than the one that dumped it. B1 =
+fresh pod, SAME node as pod A. B2 = fresh pod, DIFFERENT node. This is the
+decisive test the whole report's "one artifact per image, reusable across
+pods" recommendation depends on. Run 2026-09-08. Pod left RUNNING at the
+end (B2), per instructions. Every claim below is MEASURED here unless
+tagged READ or INFERRED.
+
+CORRECTION (this file was originally written with a wrong root-cause
+diagnosis after B1 and B2's first restore attempts. Section 5 below
+originally attributed the failure to CRIU's build-ID check being confused
+by per-pod mount-instance identity -- a coordinator review, reading criu
+4.1.1's actual source for validate_with_build_id(), pointed out that check
+is a pure ELF-note content comparison with no st_dev/st_ino/mount input at
+all, so byte-identical content cannot produce "has bad build-ID". That
+review is correct and the mount-identity diagnosis is WRONG. The refuted
+reasoning is left in place below, with the refutation, rather than deleted
+-- see section 5. The real cause (section 5b) is a self-inflicted harness
+artifact: an apt package-version drift in libblkid1 between when pod A's
+toolchain setup ran and when B1/B2's did. Once corrected, restore
+SUCCEEDED. This file's BINARY VERDICT and accounting sections below reflect
+the corrected, final result.)
+==============================================================================
+
+------------------------------------------------------------------------------
+BINARY VERDICT (read this section first)
+------------------------------------------------------------------------------
+B1 (same node, pokprod-b93r39s1):  RESTORE FAILED, 2/2 tries, both with the
+libblkid build-ID error below. B1 was deleted (RWO PVC handoff to B2)
+before the real cause was identified, so the fix was never tried in B1 --
+see section 9 for what that leaves unverified.
+
+B2 (different node, pokprod-b93r43s3): RESTORE FAILED on the first attempt
+(1/1, same error as B1) -- THEN, after identifying and correcting the real
+cause (a libblkid1 package-version mismatch, section 5b), RESTORE
+SUCCEEDED on all 3 subsequent attempts (3/3), with correct completion text
+every time. See section 4b for the fix and section 7 for full accounting.
+
+**The corrected, final verdict: cross-pod, cross-node CRIU restore of this
+`--stage server` image WORKS, once the two pods run byte-identical shared
+libraries.** The original failure was not a CRIU limitation and not a
+mount/namespace-identity problem -- it was pod A and pod B having different
+on-disk bytes for one transitively-imported system library
+(libblkid.so.1.1.0), because criu-setup.sh installs its toolchain via
+apt at runtime, and apt's dependency resolution pulled a newer libblkid1
+into pod A (at some point before its dump) than the version baked into the
+base container image that B1 and B2 started from. See section 5b for the
+exact before/after build-IDs, decoded straight from the criu image, that
+prove this.
+
+All three original attempts (both B1 tries, B2's first try) failed with
+the SAME error, byte-for-byte, occurring before the restored process ever
+resumes (no health check, no completion text, no server -- restore never
+gets past VMA reconstruction):
+
+    criu restore rc=1 in 0.12-0.14s
+    (00.1xxxxx)  26297: Error (criu/files-reg.c:2153): File
+        usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0 has bad build-ID
+    (00.1xxxxx)  26297: Error (criu/mem.c:1424): `- Can't open vma
+    (00.1xxxxx) Error (criu/cr-restore.c:2320): Restoring FAILED.
+
+This is CRIU's own file-identity safety check (files-reg.c:2153,
+validate_with_build_id()) refusing to map a shared library back into the
+restored process's address space because the ELF build-ID note CRIU reads
+from the file at restore time does not memcmp-equal the build-ID it stored
+at dump time for the same logical file (usr/lib/x86_64-linux-gnu/
+libblkid.so.1.1.0). This check is a pure content comparison (dump side:
+store_validation_data_build_id() reads NT_GNU_BUILD_ID via get_build_id();
+restore side: re-derives the note from the reopened fd and memcmp()s) --
+it has no mount-identity, st_dev, or st_ino input anywhere in that path.
+CRIU treats a build-ID mismatch as "the file's content actually changed
+since dump" -- and in this case it was RIGHT: the file genuinely did have
+different content in pod A vs. B1/B2 (see 5b).
+
+Recurring in BOTH B1 and B2 on the ORIGINAL (mismatched-library) attempts
+-- same node and different node alike -- correctly ruled out node-specific
+candidate failure modes (nvidia-uvm minor-number drift, hostname/UTS
+change) as the cause; that part of the original diagnosis stands. What was
+wrong was concluding "therefore it must be mount/pod-instance identity" --
+the real common factor across B1 and B2 was that BOTH are fresh pods that
+never ran criu-setup.sh's apt path the way pod A's underlying environment
+had, at whatever point pod A picked up the newer libblkid1 -- not the pods'
+node or mount identity.
+
+A cold-boot sanity control was run in BOTH pods before the real cause was
+found (see COLD-ARM SANITY CHECKS) and succeeded in both, with correct
+completion text -- this correctly ruled out "the pod itself is broken"
+(GPU access, model loading, vLLM serving all work fine in B1 and B2) as an
+explanation, and that conclusion also stands unchanged by the correction.
+
+------------------------------------------------------------------------------
+0. SETUP -- deploy, script transfer, toolchain verify
+------------------------------------------------------------------------------
+Sequencing (PVC coldstart-cache is RWO, strictly sequential): pod A deleted
+-> namespace confirmed empty -> B1 applied (nodeName: pokprod-b93r39s1,
+overlay of manifests/pod-exec-criu-b.yaml, committed file untouched) -> B1
+Ready in ~9s, PVC bound cleanly, no FailedAttachVolume. Later: B1 deleted ->
+namespace confirmed empty -> B2 applied (nodeName: pokprod-b93r43s3) -> B2
+Ready in 8s.
+
+Node choice for B2: MEASURED via `kubectl describe node` Allocated
+resources. pokprod-b93r39s2 (the predictions doc's original B2 candidate)
+was at 8/8 GPUs allocated -- unusable. pokprod-b93r43s3 was at 0/6 -- used
+instead. This is a genuinely different node AND a different rack
+(b93r43 vs pod A/B1's b93r39).
+
+manifests/pod-exec-criu-b.yaml does not include scripts/*.sh (only the
+coldstart-probe configMap's cs_*.py modules are mounted, at
+/opt/coldstart-src) -- `kubectl cp scripts/ <pod>:/tmp/` was required in
+BOTH B1 and B2 before criu-setup.sh or criu-preboot.sh could even be
+invoked. Not a bug, just a manifest fact worth recording for whoever runs
+this next.
+
+criu-setup.sh --verify: PASSED in both B1 and B2, hit the PVC toolchain
+cache both times (no recompile -- see below for the one place this almost
+went wrong), plugin/binary ABI cross-check OK, round-trip VERDICT: IDENTICAL
+in the CUDA smoke test both times.
+
+------------------------------------------------------------------------------
+1. BUG FOUND AND FIXED IN scripts/criu-setup.sh (found live in B2)
+------------------------------------------------------------------------------
+A provenance-labeling fix applied earlier in this session (before B1) had a
+real bug of its own, which B1's run never exercised (B1 hit the
+"cuda-checkpoint already in image" branch, which bypasses the buggy code
+path entirely) but B2's fresh-pod run did.
+
+Symptom: `bash criu-setup.sh --verify` in B2 aborted immediately after
+"cuda-checkpoint already cached at $dst -- skipping fetch" with:
+    criu-setup.sh: line 437: CUDA_CKPT_FETCH_ORIGIN: unbound variable
+
+Root cause: the caller does `CUDA_CKPT_PATH="$(fetch_cuda_checkpoint)"` --
+a command substitution, which always runs fetch_cuda_checkpoint() in a
+SUBSHELL. The earlier fix had that function set CUDA_CKPT_FETCH_ORIGIN
+internally to label cache-hit vs. real-fetch provenance; that assignment
+is invisible to the caller once the subshell exits, regardless of
+local/global declaration. Under `set -uo pipefail` (line 92), the caller's
+read of the never-set variable is a hard crash, not silent unset-to-empty.
+
+Fix: moved the origin determination out of the subshell. ensure_cuda_
+checkpoint() now checks `[[ -x "$DL_CACHE/cuda-checkpoint" ]]` itself, in
+its own (non-subshelled) scope, before calling fetch_cuda_checkpoint --
+the same predicate that function checks internally, safe to re-read because
+it's a pure filesystem check with no side effects prior to the point
+fetch_cuda_checkpoint would create/mv the file. fetch_cuda_checkpoint() no
+longer sets or references CUDA_CKPT_FETCH_ORIGIN at all.
+
+Verified: bash -n syntax check clean; grep confirms no remaining reference
+to CUDA_CKPT_FETCH_ORIGIN anywhere in the file; corrected script copied
+into B2 and re-run -- RC=0, ELAPSED_S=15, VERIFY PASSED, provenance written
+correctly with `cuda-checkpoint : /usr/local/bin/cuda-checkpoint (already
+in image)`. This exercised the "already in image" branch again, not the
+cache-hit-label branch specifically -- the exact fixed string on a genuine
+cache-hit was not re-observed live, only confirmed by code inspection
+(bash -n plus manual trace of both branches).
+
+------------------------------------------------------------------------------
+2. PROVENANCE DIFF (pod A vs B1 vs B2)
+------------------------------------------------------------------------------
+B1 vs pod A: diff showed ONLY timestamp, host(pod) name, and plugin mtime
+differing. Every other field (kernel, criu version/path, plugin size/mode/
+sha256, plugin source = cache hit, cache key, cuda-checkpoint path/origin/
+version, driver version, verify result) byte-identical.
+
+B2 vs pod A (this session, MEASURED via diff on the two provenance files):
+    1,2c1,2
+    < === criu-setup provenance (2026-09-08T16:18:45Z) ===
+    < host (pod)        : vllm-coldstart
+    ---
+    > === criu-setup provenance (2026-09-08T17:41:12Z) ===
+    > host (pod)        : vllm-coldstart-b
+    9c9
+    < plugin mtime       : 2026-09-08 16:18:29.319200468 +0000
+    ---
+    > plugin mtime       : 2026-09-08 17:40:57.775273332 +0000
+
+Identical pattern to B1: only timestamp/host/plugin-mtime differ. Plugin
+sha256 (adcffa579dfa2ce11cff25ba69bd8ddcb2b8a816050d808ba7462cc1892892db),
+cache key (criu4.1.1_driver580.105.08), driver version (580.105.08), and
+"verify: PASSED" all match exactly across all three pods. The toolchain
+cache is doing its job identically regardless of node.
+
+------------------------------------------------------------------------------
+3. PVC HASH RE-VERIFICATION (image bytes, not toolchain)
+------------------------------------------------------------------------------
+sha256sum -c against crosspod-image-manifest.txt (48 files, 637387847
+bytes), run four times total across this experiment:
+  pod A, immediately before deletion:        48/48 OK  (prior session)
+  B1, immediately after PVC attach:          48/48 OK
+  B1, immediately before deletion:           48/48 OK
+  B2, immediately after PVC attach:          48/48 OK
+
+The image bytes are bit-identical across TWO independent RWO detach/
+reattach cycles (pod A -> B1, B1 -> B2), the second one crossing nodes.
+No silent rebuild occurred at any point. This rules out "the artifact
+itself was corrupted or regenerated" as an explanation for the restore
+failures below -- the bytes criu is reading in B1 and B2 are exactly the
+bytes pod A wrote.
+
+------------------------------------------------------------------------------
+4. RESTORE ATTEMPTS -- exact transcripts
+------------------------------------------------------------------------------
+B1, attempt 1 (17:28:29):
+    criu restore rc=1 in 0.14s
+    (00.126203)  26297: Error (criu/files-reg.c:2153): File
+        usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0 has bad build-ID
+    (00.126208)  26297: Error (criu/mem.c:1424): `- Can't open vma
+    (00.126232) Error (criu/cr-restore.c:2320): Restoring FAILED.
+
+B1, attempt 2 (17:31:06), independent criu invocation, run purely to
+confirm determinism before ruling out retry-and-hope:
+    criu restore rc=1 in 0.12s
+    (00.107995)  26297: Error (criu/files-reg.c:2153): File
+        usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0 has bad build-ID
+    (00.107995)  26297: Error (criu/mem.c:1424): `- Can't open vma
+    (00.108031) Error (criu/cr-restore.c:2320): Restoring FAILED.
+Byte-identical error text, byte-identical failing file, same order of
+magnitude timing. Deterministic, not a race.
+
+B2, attempt 1 (17:42:18), different node, after a fresh --verify pass and a
+fresh hash re-check:
+    criu restore rc=1 in 0.13s
+    (00.114070)  26297: Error (criu/files-reg.c:2153): File
+        usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0 has bad build-ID
+    (00.114075)  26297: Error (criu/mem.c:1424): `- Can't open vma
+    (00.114098) Error (criu/cr-restore.c:2320): Restoring FAILED.
+Same file, same error, same order of magnitude timing, on hardware and a
+kernel image pod A never touched.
+
+criu-reaper.py's subreaper mechanism reaped the orphaned dumped pid 26297
+cleanly after EVERY one of the three attempts ("[reaper] reaped orphan
+26297"), in both pods -- ruling out pid-reclamation as a contributing
+factor. The failure occurs upstream of process resumption entirely (VMA
+restoration for a shared library), not in anything the reaper is
+responsible for.
+
+Full run/preboot logs and the raw criu restore.log (194KB, -v4) for both
+pods are preserved at reports/criu-raw/b1-artifacts/ and
+reports/criu-raw/b2-artifacts/.
+
+------------------------------------------------------------------------------
+5. ROOT CAUSE, ORIGINAL DIAGNOSIS -- mount-instance identity -- REFUTED
+------------------------------------------------------------------------------
+This section is the diagnosis as originally written, kept intact rather
+than deleted, immediately followed by the refutation that killed it. Do
+not skip to 5b without reading why this was wrong -- the mistake is
+instructive: a plausible mechanism, with real supporting measurements, that
+was nonetheless the wrong explanation for this specific error.
+
+ORIGINAL REASONING: crosspod-predictions.txt (prior session) pre-registered
+"mount-instance identity" as the single highest-ranked, untested risk for
+this experiment. The measurements below were read as confirming it as the
+direct, causal mechanism of the restore failure.
+
+MEASURED (from pod A's preserved dump.log on the PVC, and from B1/B2 live
+inspection of the identical logical file):
+  pod A dump-time device:inode for libblkid.so.1.1.0:  103:08  572562560
+  B1 live stat for the same file:            Device: 0,617  Inode: 4027908401
+  file content: readelf build-ID f3d6283f... (this was WRONGLY asserted to
+      be "IDENTICAL sha256 to pod A's" -- no sha256 of pod A's actual
+      dump-time file bytes was ever taken, because pod A no longer existed
+      by the time this comparison was made; only image digest and overlay
+      layer list were compared, which is not the same claim -- see below)
+  container image digest and overlay lowerdir= layer list: IDENTICAL
+      between pod A and B1 (same image pull, IfNotPresent, same node)
+
+The original write-up concluded from this that CRIU's build-ID check must
+be confused by mount-instance/device-identity differences between pods,
+since the file's image-layer provenance was identical.
+
+REFUTATION (coordinator review of criu 4.1.1 source, criu/files-reg.c):
+validate_with_build_id(), called via validate_file() from open_path(), is
+a PURE ELF-note content comparison:
+  dump side:    store_validation_data_build_id() reads NT_GNU_BUILD_ID via
+                get_build_id(fd, ...) and stores it in rfe->build_id.
+  restore side: re-derives the note from the reopened fd and does
+                memcmp(build_id, rfi->rfe->build_id, build_id_size).
+There is no st_dev, no st_ino, no mount ID, anywhere in that path. The
+mismatch branch is only reachable AFTER a build-ID was successfully read on
+both sides (`if (!build_id || build_id_size == -1) return 0` skips
+validation otherwise) -- and a length mismatch produces a DIFFERENT
+message ("has bad build-ID length"), which never appeared. Byte-identical
+file content categorically CANNOT produce "has bad build-ID". Therefore:
+libblkid.so.1.1.0 was genuinely a DIFFERENT file, byte-for-byte, in pod A
+at dump time than in B1/B2 at restore time. The "content provably
+identical" claim above was never actually established -- it rested on
+image digest and lowerdir comparison, which speaks to what the IMAGE
+shipped, not to what the RUNNING container's writable layer had mutated
+that file into since. Section 5b confirms exactly that mutation happened,
+and to which specific bytes.
+
+The device:inode numbers quoted above are real measurements and remain
+true (mount-instance identity DOES vary per pod, as predicted) -- they are
+simply not evidence for THIS failure's cause. They are irrelevant to
+validate_with_build_id(), which never reads them.
+
+------------------------------------------------------------------------------
+5b. ROOT CAUSE, CORRECTED AND CONFIRMED -- apt package-version drift in
+    libblkid1, a self-inflicted harness artifact
+------------------------------------------------------------------------------
+Cheap, no-GPU-time investigation in B2 (still running, PVC/configmap
+untouched):
+
+1. `dpkg -l libblkid1` in B2, BEFORE any fix: Installed 2.39.3-9ubuntu6.5.
+   `apt-cache policy libblkid1`: Candidate 2.39.3-9ubuntu6.6, available from
+   BOTH noble-updates and noble-security -- i.e. a security update sitting
+   in the index, not yet applied to this pod's base image.
+2. `readelf -n /usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0` in B2 at .5:
+   Build ID: 1afaea6d6a83963f19829dd67efe817c95855146
+   (Change/Birth timestamps on the file: 2026-08-26 -- baked into the base
+   image at build time, not touched by anything this session ran.)
+3. Decoded the build-ID CRIU actually recorded for this file at DUMP time,
+   straight from pod A's still-present criu image on the PVC. `crit` was
+   not installed (apt index gap, same drift class as Bug 1 in the parent
+   report) -- fetched python3-pycriu_4.1.1-1build1_all.deb directly from
+   the same Ubuntu pool criu-setup.sh already falls back to for the criu
+   package itself, `dpkg -i` + `apt-get install -f` to pull python3-
+   protobuf, then:
+       crit decode -i /cache/criu-img/preboot-server/files.img
+   The reg_file_entry for usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0 carries
+       build_id: [2303451952, 3467004697, 3159707735, 4099193167,
+                  1970570689]
+   (repeated uint32, 5 words = 20 bytes = one SHA1-length GNU build-id
+   note, per images/regfile.proto fetched from the criu github source at
+   tag v4.1.1). Packed as 5 little-endian uint32 words and hex-dumped:
+       30e34b89194ba6ce575055bc4fb954f4c1857475
+4. `apt-get install -y --only-upgrade libblkid1` in B2, taking it to the
+   apt candidate 2.39.3-9ubuntu6.6 (pulled libmount1, libsmartcols1,
+   libuuid1, libfdisk1, mount along with it -- normal dependency chain,
+   nothing unexpected). New build-ID:
+       Build ID: 30e34b89194ba6ce575055bc4fb954f4c1857475
+
+Step 3's decode and step 4's post-upgrade readelf are an EXACT match,
+character for character. Pod A's dumped process had libblkid1
+2.39.3-9ubuntu6.6 (or a build with that identical build-ID) mapped; B1 and
+B2 started from the base image's 2.39.3-9ubuntu6.5. Confirmed, not
+inferred.
+
+WHY the drift happened: criu-setup.sh's ensure_criu() does, on the path
+where the apt index lacks a direct criu candidate (Bug 1, already
+documented in the parent report and re-observed as recurring in this
+session): fetches criu's and libcompel1's .deb directly from the Ubuntu
+pool, `dpkg -i`s them, then runs `apt-get install -y -f` to let apt resolve
+the remaining runtime deps from the ordinary index. `apt-get install -f`
+repairs broken dependencies by whatever means the resolver picks, including
+upgrading unrelated already-installed packages if doing so is part of the
+cheapest fix it finds -- this is exactly the class of dependency-resolution
+side effect that can pull in a newer libblkid1 as a side effect of fixing
+something else entirely, with nothing in the script's own output calling
+attention to it. Whether pod A's specific fetch/install run actually pulled
+this exact upgrade via that `-f` step, versus some other apt invocation
+somewhere in pod A's longer lifetime (pod A had been running 72+ minutes
+across an earlier session's worth of experiments before this session's
+dump was taken, per the prior session's own notes -- plenty of opportunity
+for an incidental `apt-get update` && `-f` elsewhere to have picked up a
+security update that landed on the mirror in the interim) was not
+distinguished further -- both are "apt touched something at runtime that
+this script did not pin," which is the operative finding either way.
+
+DEPLOYMENT CONSEQUENCE (this is the actual, corrected conclusion the parent
+report needs, replacing the falsified "mount-identity" one from section 5):
+a criu image is only portable across pods of the "same" container image if
+every package that gets INSTALLED OR MUTATED AT RUNTIME by the setup
+tooling is pinned to an exact version, the same way ensure_criu() already
+pins criu itself (CRIU_PKG_VER, with an explicit comment warning against
+relaxing that pin). It is not -- libblkid1 (and, by the same mechanism,
+whatever else apt's dependency resolver decides to touch on a given day)
+is left to float to "whatever the index has today." The setup script's own
+existing comments already point at the right fix: bake the toolchain into
+the container image at build time, rather than apt-installing anything at
+runtime in each pod. Runtime apt installation makes every pod's exact
+runtime library set a function of "which day it happened to run
+criu-setup.sh," which is precisely the class of hidden variable that
+breaks any restore depending on ELF build-ID stability -- not because
+CRIU's check is wrong (it did its job correctly both times: it caught a
+real content mismatch), but because the harness handed it two genuinely
+different environments and expected the image to be portable across them
+anyway.
+
+This is the same class of error as the other two the parent report
+already records elsewhere in this experiment (a missing distro plugin
+package, a missing `__main__` guard on a preload child) -- an artifact of
+this harness's own runtime-provisioning approach, not a fundamental limit
+of the checkpoint/restore mechanism itself.
+
+------------------------------------------------------------------------------
+4b. RETRY -- once libraries matched, restore succeeded (3/3, B2 only)
+------------------------------------------------------------------------------
+With libblkid1 upgraded to match pod A's recorded build-ID exactly (5b),
+re-ran the restore in B2 against the SAME, untouched PVC image (no
+rebuild, no new dump -- this is pod A's original artifact):
+
+    Retry 1 (17:58:47): criu restore rc=0 in 1.83s
+        restore start -> health_200:    51.61s
+        restore start -> completion:    52.45s
+        completion: ' Paris.  True or False?  Explain your answer. The
+            statement "The capital of France is Paris" is **True**.
+            \n\n**Explanation:**  \nParis'
+        grep -aE 'Error \(|error \(' restore.log: no matches (exit 1),
+            checked explicitly despite rc=0, per instructions.
+        GPU memory after arm: 0, 0 MiB / 1, 0 MiB (clean)
+
+    Retry 2 (18:00:43): criu restore rc=0 in 1.84s
+        restore start -> health_200:    51.19s
+        restore start -> completion:    52.04s
+        completion text: identical to retry 1
+        GPU memory after arm: 0, 0 MiB / 1, 0 MiB (clean)
+
+    Retry 3 (18:02:54): criu restore rc=0 in 1.87s
+        restore start -> health_200:    51.51s
+        restore start -> completion:    52.34s
+        completion text: identical to retry 1
+        GPU memory after arm: 0, 0 MiB / 1, 0 MiB (clean)
+
+criu-reaper.py reaped the orphaned dumped pid 26297 cleanly on every one
+of these attempts too, same as it did on the failing ones -- the reaper's
+correctness was never in question, in either the failing or succeeding
+phase of this experiment.
+
+This is the primary deliverable's binary result, corrected: **restore
+succeeds, deterministically (3/3), in a pod other than the one that
+dumped it, on a different node, once the pods' shared library sets are
+made identical.** The `--stage server` artifact IS reusable across pods of
+the same container image, contingent on that precondition -- which section
+5b establishes is a toolchain-provisioning discipline problem, not an
+inherent property of the artifact or of CRIU.
+
+------------------------------------------------------------------------------
+6. COLD-ARM SANITY CHECKS (not the primary deliverable, but load-bearing
+   for ruling out "the pod itself is broken")
+------------------------------------------------------------------------------
+B1, one cold-boot arm run after the two failed restores, same pod session:
+    exec -> health_200   : 70.14s
+    exec -> completion   : 70.94s
+    completion: ' Paris.  True or False?  Explain your answer. The
+        statement "The capital of France is Paris" is **True**.
+        \n\n**Explanation:**  \nParis'
+    GPU memory after kill: 0, 0 MiB / 1, 0 MiB (clean, hygiene rule 3 OK)
+
+B2, cold-1 (17:44:0x), run immediately after the failed restore, BEFORE
+the libblkid fix -- and B2's genuinely FIRST-EVER vLLM boot in this pod
+(nothing had touched the model-weight or import-chain files on disk yet):
+    exec -> health_200   : 103.02s
+    exec -> completion   : 103.86s
+    completion: identical text to B1's
+    GPU memory after kill: 0, 0 MiB / 1, 0 MiB (clean)
+
+B2, cold-2 (18:0x:xx) and cold-3 (18:0x:xx), run AFTER the fix, interleaved
+with the successful restore-2/3/4 arms (section 4b) as the task's n=3
+accounting design calls for:
+    cold-2: exec -> health_200 : 54.96s
+    cold-3: exec -> health_200 : 57.23s
+    Both completions textually identical to cold-1/B1's. GPU memory clean
+    after both.
+
+Both completions are textually identical and correct -- vLLM serves
+correctly from a cold boot in both pods, on both nodes.
+
+IMPORTANT CONFOUND, discovered by comparing cold-1 to cold-2/cold-3: cold-1
+(103.02s) is dramatically slower than cold-2 (54.96s) or cold-3 (57.23s) --
+roughly double. This is almost certainly page-cache / registry-cache
+warming: cold-1 was the pod's first-ever read of the model weight files and
+the torch/vllm import chain from the underlying PVC/image storage; by
+cold-2 and cold-3, those same blocks were already resident in the kernel
+page cache from cold-1 (and from the interleaved restore arms, which also
+touch some of the same import-chain files during process setup even though
+restore itself skips re-running the imports). B1's single cold-arm
+(70.14s) sits between these two B2 numbers and is ALSO an n=1, first-boot-
+in-that-pod measurement, so it is not directly comparable to either B2
+number without the same caveat. None of node identity, contention, or
+registry egress path was instrumented for any of these five cold
+measurements -- the page-cache explanation is the most likely one given the
+pattern (first-ever-boot vs. repeat-boot-in-same-pod), but it was not
+independently isolated (e.g. by dropping caches between arms), so it is
+INFERRED, not measured directly. This confound is the reason section 7's
+accounting below reports two different "win" numbers rather than one.
+
+------------------------------------------------------------------------------
+7. SECONDARY DELIVERABLE (magnitude, within-arm accounting) -- OBTAINED (B2
+   only, post-fix)
+------------------------------------------------------------------------------
+Once restore succeeded (section 4b), the task's SECONDARY deliverable
+(win = imports_carried - restore_cost, n=3 interleaved restore/cold arms)
+became obtainable in B2. B1 never restored successfully (deleted before the
+fix was found), so this section is B2-only -- see section 9.
+
+Restore arms (n=3, chronological, all post-fix, all against pod A's
+original untouched PVC image):
+    restore-2: criu restore 1.83s, restore->health_200 51.61s
+    restore-3: criu restore 1.84s, restore->health_200 51.19s
+    restore-4: criu restore 1.87s, restore->health_200 51.51s
+    mean restore->health_200: 51.44s   (spread: 0.42s, restore-3 to restore-2)
+    mean criu restore itself: 1.847s   (spread: 0.04s)
+
+Cold arms (n=3, chronological, interleaved with the above; cold-1 ran
+BEFORE the fix, cold-2/cold-3 ran AFTER, interleaved with restore-2/3/4):
+    cold-1 (true first boot, pre-fix): health_200 103.02s
+    cold-2 (post-fix, cache-warm):     health_200 54.96s
+    cold-3 (post-fix, cache-warm):     health_200 57.23s
+
+cold-1 IS EXCLUDED and no win is computed against it. An earlier version of
+this section reported a second win of 51.58s (~50%) against it, presented as
+an alternative reading. That was wrong and is retracted: it is not a second
+measurement of this lever, it is a page-cache miss on 61 GiB of weights, and
+the logs measure it directly rather than leaving it to inference --
+
+    b2-cold-1.preboot.log:43   Loading weights took 58.94 seconds
+    b2-cold-3.preboot.log:43   Loading weights took 27.08 seconds
+
+31.86s of the 45.79s gap between cold-1 and cold-3 is weight load alone, on
+the same 61.02 GiB GPFS checkpoint with auto-prefetch disabled in both. The
+import-warm image carries IMPORTS; it does nothing about weight load, and the
+report's A2 investigation already measured weight load as identical across
+restore and cold arms (29.05s both). A cold boot's own second run recovers
+that time with no criu involved -- cold-2 and cold-3 are that second run.
+Crediting it to the checkpoint would inflate a ~4s lever by about 12x. This
+is the same exclusion, on the same grounds, that the parent report already
+applies to its own TP=1 r1 baseline outlier (92.7s vs 58.0s/57.8s, "weight
+load 56.8s vs ~30.0s").
+
+THE ONE WIN NUMBER, vs. the cache-warm cold arms (mean of cold-2/cold-3,
+56.10s), which is the like-for-like comparison because the restore arms also
+ran cache-warm and interleaved with them:
+
+        win = 56.10s - 51.44s = 4.66s saved per restore, ~8% reduction.
+
+CHECKED AGAINST ITS OWN BOUND (win must not exceed imports carried minus
+restore cost -- the discipline the parent report's point 5 is built on, and
+the check the A2 investigation got wrong by using the build-time constant
+instead of each arm's own measurement). From cold-3's own log, poller start
+18:03:55 to vLLM's first output 18:04:02 is ~7s of interpreter startup and
+imports, the work the image carries. Restore costs 1.83-1.87s. So the bound
+is ~5.2s, and the measured 4.66s sits inside it. It closes.
+
+But only in the mean, and that is the honest caveat. Per-arm the win ranges
+3.52s (vs cold-2) to 5.79s (vs cold-3), which straddles the bound: against
+cold-3 alone it would violate it. The cold arms are 2.27s apart at n=2 --
+roughly half the size of the effect being measured -- the bound itself is
+only good to about +/-1s because vLLM's log timestamps have 1-second
+resolution, and cold-2's preboot log was overwritten so its phase mix cannot
+be recovered. Conclusion: this lever is real and is worth about 4s. It is NOT
+resolvable to the precision the parent report claims for it ("4.07s, with the
+accounting closing to 0.13s") on a node this session shares with other work.
+
+The honest reading: restore is unambiguously faster than cold boot in
+BOTH framings (criu restore itself completing in under 2s is the clearest,
+least confounded number in this whole report), but the SIZE of the win is
+highly sensitive to which cold baseline is "fair," and this experiment did
+not control for page-cache state well enough to pick one framing over the
+other with confidence. (a) overstates the everyday win if boots after the
+first are the realistic comparison; (b) may understate the win relative to
+a genuinely cold node (e.g. first pod on a node after a reboot, or a node
+whose page cache was evicted under memory pressure from other tenants),
+which is a real, not merely hypothetical, deployment scenario this n=3
+series does not distinguish from "warm."
+
+------------------------------------------------------------------------------
+8. DEVICE / MOUNT STATE, ALL THREE PODS
+------------------------------------------------------------------------------
+                        pod A            B1 (same node)    B2 (diff node)
+node                    pokprod-b93r39s1 pokprod-b93r39s1   pokprod-b93r43s3
+hostname                vllm-coldstart   vllm-coldstart-b   vllm-coldstart-b
+nvidia-uvm major:minor  503,0            503,0              503,0
+nvidia0/nvidiaN minors  0,4              (not re-captured    6,7
+                                          in this session's
+                                          summary; see prior
+                                          B1 continuation)
+/cache mount ID         29797            24968 (prior sess.) 26720
+/criu mount ID          29798            24970 (prior sess.) 26724
+/dev/shm mount ID       29804            24976 (prior sess.) 26764
+/cache underlying dev   0:781            (not separately     0:860
+                                          recorded)
+GPU UUIDs               a03ba92b...,     (same physical      98645ec8...,
+                        f2be4d53...      GPUs as pod A,      a1a6eb5b...
+                                         same node)
+
+/dev/nvidia-uvm is STABLE at 503,0 across all three pods, including across
+the node boundary (pod A/B1 on pokprod-b93r39s1, B2 on pokprod-b93r43s3).
+This DIRECTLY CONTRADICTS the predictions doc's ranking of nvidia-uvm
+device numbering as an untested B2-specific risk -- it was measured this
+session and is not the source of any observed problem. GPU minor numbers
+(nvidia0, nvidia4, nvidia6, nvidia7) do differ by node, as expected
+(host-wide minor assignment reflects each node's own GPU inventory), but
+this also correlates with nothing observed to fail.
+
+Mount IDs differ in every pod, as predicted. Sections 5/5b establish that
+none of this is actually why the restore failed: the device:inode/mount-ID
+variation is real and worth keeping on record (a future experiment might
+hit a case where it DOES matter), but the operative cause here was apt
+package-version drift in a shared library's actual byte content
+(libblkid1, section 5b) -- a variable this table does not capture at all,
+since it is about file CONTENT, not file IDENTITY (device/inode/mount).
+The table below is retained unedited as a measurement record, not as
+evidence for the failure.
+
+hostname/UTS: changed in both B1 and B2 (vllm-coldstart-b vs pod A's
+vllm-coldstart) exactly as designed, to reopen this as a variable. It was
+NOT exercised as a candidate cause -- restore fails during VMA/file
+restoration, strictly before UTS/hostname would ever be touched during
+process resumption. This variable remains formally untested by this
+experiment; it simply never got the chance to matter.
+
+------------------------------------------------------------------------------
+9. WHAT REMAINS UNVERIFIED
+------------------------------------------------------------------------------
+- B1 was never retried with the fix -- it was deleted (to free the RWO PVC
+  for B2) before the real cause (5b) was identified. It is reasonable to
+  expect B1 would also succeed once given a matching libblkid1 (same base
+  image as B2, same class of fresh-pod "never touched libblkid1" state),
+  but this was not directly tested. If a same-node restore is later needed
+  as its own data point (distinct from cross-node), that gap should be
+  closed by re-running B1 with the fix pre-applied.
+- Pod A's own exact apt-invocation timeline -- which specific command, at
+  which point in its 72+-minute lifetime, actually pulled the newer
+  libblkid1 in -- was not reconstructed. Two candidate mechanisms were
+  identified (criu-setup.sh's `apt-get install -y -f` step inside
+  ensure_criu()'s pool-fallback path, vs. some other incidental apt
+  invocation elsewhere in pod A's lifetime) but not distinguished, because
+  pod A no longer exists to inspect. Both point to the same operative
+  finding (apt touched something at runtime, unpinned), so this gap does
+  not weaken the conclusion, but it does mean the EXACT trigger step is
+  not nailed down.
+- hostname/UTS-namespace restore behavior remains untested in the ORIGINAL
+  failing attempts (restore never survived long enough to reach that code
+  path); it WAS implicitly exercised in the 3 successful B2 retries
+  (different hostname than pod A, restore succeeded regardless), so this
+  item is now substantially, though not exhaustively, addressed.
+- Whether ANY OTHER package besides libblkid1 (and its direct dependency-
+  chain siblings: libmount1, libsmartcols1, libuuid1, libfdisk1, mount) also
+  drifted between pod A and B1/B2 was not exhaustively checked -- only the
+  one file CRIU's own build-ID check flagged was investigated. It is
+  possible other, non-imported-at-dump-time files also differ without
+  having been caught, simply because nothing tried to load them.
+- The page-cache-warming confound between cold-1 (103.02s) and cold-2/
+  cold-3 (54.96s/57.23s) is NOT merely inferred: the per-phase logs measure
+  it (weight load 58.94s vs 27.08s, a 31.86s delta out of a 45.79s total
+  gap). What was not run is a deliberate cache-drop-and-remeasure control to
+  confirm the mechanism in the other direction. cold-1 is excluded, not
+  averaged, and a single win of 4.66s is reported -- see section 7.
+- B1's single cold-arm timing (70.14s) remains an n=1, first-boot-in-pod
+  measurement carrying the same first-read weight-load cost as cold-1, so it
+  is not comparable to either B2 cold baseline. Not repeated: B1 was deleted
+  before the real cause was found. This is the SAME-NODE arm, i.e. the
+  strictly weaker claim, and it is subsumed by the cross-node success in
+  section 4b -- pod A ran on pokprod-b93r39s1 and the successful restores ran
+  on pokprod-b93r43s3. It is not worth GPU time to repeat.
+- Driver 580.105.08 and kernel 5.14.0-570.64.1.el9_6.x86_64 are uniform
+  across all 13 labeled H100 nodes here, so what section 4b demonstrates is
+  portability across a HOMOGENEOUS fleet. Driver or kernel skew is untested
+  and was never testable on this cluster; it is the gap that replaced the
+  cross-pod one.
+- GPU minor-number list for B1 was not re-captured in this continuation
+  (already captured and reported in the prior session's B1 work); shown as
+  "not re-captured" in the table above rather than fabricated.
+- Whether ANY configuration of criu (e.g. --skip-file-rwx-check, a
+  different build-ID validation mode) could route around the files-
+  reg.c:2153 check even with mismatched libraries was not investigated --
+  moot now that the actual fix (matching the libraries) is known to work
+  and is the correct fix, not a workaround.
+
+------------------------------------------------------------------------------
+10. STATE LEFT BEHIND
+------------------------------------------------------------------------------
+Pod B1 (vllm-coldstart-b, pokprod-b93r39s1) was DELETED after its restore
+attempts and cold-arm control, to free the RWO PVC for B2 -- per the
+sequencing constraint, this pod could not coexist with B2. Pod B2
+(vllm-coldstart-b, pokprod-b93r43s3) is LEFT RUNNING, per instructions.
+
+B2's ephemeral writable layer now additionally contains (installed/upgraded
+during this investigation's root-cause work, section 5b): libblkid1,
+libmount1, libsmartcols1, libuuid1, libfdisk1, and mount all upgraded to
+2.39.3-9ubuntu6.6 (from the base image's .5); plus crit, python3-pycriu,
+libprotobuf32t64, and python3-protobuf newly installed (needed to decode
+pod A's criu image). None of this persists if B2 is deleted and recreated
+from the same base image -- it is confined to this pod's current writable
+layer, exactly like every other apt-touched package this report discusses.
+This is itself a small illustration of the report's own conclusion: nothing
+about B2's current state is baked into any image, so a THIRD fresh pod
+today would reproduce B1/B2's ORIGINAL (pre-fix) mismatch against pod A's
+now-nonexistent dump, not today's B2 state.
+
+PVC coldstart-cache and configmap coldstart-probe were not deleted or
+modified (only scripts/criu-setup.sh was edited, in the repo, as detailed
+in section 1). Nothing was committed to git.

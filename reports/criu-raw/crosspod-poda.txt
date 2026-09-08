@@ -1,0 +1,610 @@
+==============================================================================
+CROSS-POD ARM A (pod A) -- replicate --stage server same-pod, then isolate
+storage (nvme vs PVC) as a same-pod control for a later cross-pod arm.
+Run 2026-09-08. Pod left RUNNING at the end, per instructions.
+==============================================================================
+scope: pod `vllm-coldstart`, ns lionel-cold-start, manifests/pod-exec-criu.yaml
+plus an overlay nodeName (the committed manifest was not edited). Node pinned
+to pokprod-b93r39s1 to match the report this replicates. Every claim below is
+MEASURED here unless tagged READ (found in another file) or INFERRED
+(reasoning, not a direct instrument reading -- never treat as a result).
+
+------------------------------------------------------------------------------
+0. SETUP
+------------------------------------------------------------------------------
+configmap: SHA1 stamp of coldstart/*.py + scripts/coldstart-run.sh matched the
+deployed configmap's PROBE_STAMP exactly (7f114cdd13d36fec5f07073ad714691
+199667296) -- `make configmap` was not needed, none of the criu scripts feed
+that stamp anyway.
+
+Deploy: applied an overlay copy of manifests/pod-exec-criu.yaml with
+`nodeName: pokprod-b93r39s1` inserted after terminationGracePeriodSeconds; the
+committed file is untouched. PodSecurity "restricted:latest" Warn fired
+(privileged, capabilities.add ALL, seccompProfile Unconfined) -- expected,
+non-blocking, matches the manifest's own header rationale. Pod reached
+1/1 Running in 9s.
+
+Node occupancy differed from the recon snapshot in crosspod-predictions.txt
+("3 of 6 GPUs free"): at deploy time `kubectl describe node` showed 4/6
+allocated (a 4th tenant pod had started 2m47s earlier); by the time A2's
+timing arms ran it was 5/6 (a decode pod,
+optimized-baseline-nvidia-gpu-vllm-decode-..., appeared mid-session). Pod A
+only asks for 2 GPUs and scheduled fine both times, but see section 5 for why
+this matters to the numbers, not just the scheduling.
+
+Registry-warm check: docs' own tracer line ("registry cache: present at t0")
+is written by coldstart-run.sh's PYTHONPATH-injected probe, which
+criu-preboot.sh's plain `vllm serve` invocation never loads -- so that line
+never appears in these logs, and its absence is not evidence of a cold
+registry. Substituted a direct file check instead:
+
+    $ find /cache/vllm -iname '*modelinfo*' -exec ls -la {} \;
+    -rw-------. 1 1004330000 root 870 Sep  3 18:12 \
+        vllm-model_executor-models-qwen3-Qwen3ForCausalLM.json
+
+Dated 2026-09-03, five days before this session -- not created at t0 by any
+arm here. Registry is WARM for every arm below, by direct inspection, not by
+the probe's own instrumentation.
+
+------------------------------------------------------------------------------
+1. criu-setup.sh -- FOUR BUGS FOUND, ALL FIXED IN THE REPO FILE
+------------------------------------------------------------------------------
+This script had never been run before this session. All four bugs below are
+now fixed in scripts/criu-setup.sh; the fixes are minimal and keep the
+existing comment style. A clean `bash criu-setup.sh --verify` run after all
+four fixes is transcribed in section 2.
+
+BUG 1 -- ensure_criu(): the apt index no longer lists criu AT ALL, pinned or
+not. `apt-cache madison criu` returned nothing; `apt-get install criu` with
+no version also failed ("no installation candidate"); a direct fetch and
+zcat of both noble and noble-updates universe Packages.gz confirmed zero
+`criu` entries. This is NOT the "pool moved on to 4.2" case the script's own
+comment warns about -- the .deb bytes for the exact pin were still sitting
+in the pool (http://archive.ubuntu.com/ubuntu/pool/universe/c/criu/), just
+dropped from the generated index. Manual repro of the failure:
+
+    [16:06:45] criu not installed -- installing 4.1.1-1build1
+    Package criu is not available, but is referred to by another package.
+    E: Version '4.1.1-1build1' for 'criu' was not found
+    [16:06:48] FATAL: apt-get install criu=4.1.1-1build1 failed
+
+Fix: on apt-get install failure, fetch criu_${CRIU_PKG_VER}_amd64.deb and its
+matching libcompel1 build directly from the pool, dpkg -i them, then
+`apt-get install -y -f` to resolve the ordinary shared-library deps
+(libnet1, libnftables1, libprotobuf-c1 -- all still present in the generic
+index) that the two pool .debs alone don't carry. Verified end to end inside
+the pod before writing the fix: manual dpkg -i left criu unconfigured on
+exactly those three missing libs; `apt-get install -f` pulled them from the
+still-functional index and completed configuration. Final state:
+`criu 4.1.1-1build1 amd64` and `libcompel1 4.1.1-1build1 amd64`, both `ii`.
+
+BUG 2 -- abi_check(): false ABI-check failures, two independent causes, same
+symptom. First build attempt after Bug 1 was fixed:
+
+    ABI cross-check FAILED -- symbols the plugin needs that /usr/sbin/criu
+    does not export:
+      __errno_location@GLIBC_2.2.5  atoi@GLIBC_2.2.5  close@GLIBC_2.2.5
+      fork@GLIBC_2.2.5  malloc@GLIBC_2.2.5  ptrace@GLIBC_2.2.5  ... (23 total)
+
+  2a. The check only looked at `nm -D` of the criu BINARY. A dlopen()'d
+      plugin resolves against the process's whole global symbol table
+      (RTLD_DEFAULT) -- criu's own exports PLUS every .so already loaded
+      alongside it, libc above all. Every ordinary libc call the plugin
+      makes therefore read as "missing". The original hand-built
+      environment.txt run only eyeballed the criu-internal names
+      (fi_strategy, compel_wait_task, ...) and never hit this; an automated
+      diff over the FULL undefined-symbol list does.
+  2b. Even after unioning in libc's exports, the same symbols still failed:
+      `nm -D` prints an undefined reference as `atoi@GLIBC_2.2.5` (one @)
+      but the DEFAULT-version export as `atoi@@GLIBC_2.2.5` (two @s) --
+      byte-for-byte these never match.
+
+  Fix: resolvable_exports() now unions `nm -D` of the criu binary with
+  `nm -D` of every library `ldd` reports it linked against, and both sides
+  of the comparison strip everything from the first `@` before diffing --
+  the dynamic linker's own version negotiation at real load time is the
+  actual gate; this check only needs to know an object providing the base
+  symbol exists somewhere criu will have loaded. Result on the next build:
+  "ABI cross-check ok: every undefined symbol in the plugin (34) is
+  exported by /usr/sbin/criu or a library it links".
+
+BUG 3 -- fetch_cuda_checkpoint(): the caller does
+`CUDA_CKPT_PATH="$(fetch_cuda_checkpoint)"`, capturing ALL of the function's
+stdout, but the function's five `say "fetching cuda-checkpoint..."` lines
+also go to stdout (say() is a plain `echo`, same as everywhere else in this
+script). CUDA_CKPT_PATH ended up holding the whole multi-line status banner
+with the real path buried at the end, then got passed as CUDA_CKPT to
+criu-matrix.sh and used directly as a command, producing garbage like:
+
+    no cuda-checkpoint at [16:17:10] fetching cuda-checkpoint from
+    github.com/NVIDIA/cuda-checkpoint (main, bin/x86_64_Linux) -- needs...
+    ...
+    VERIFY FAILED: did not find both the plugin-stage-0 success line ...
+
+Fix: redirected every `say` call inside fetch_cuda_checkpoint to stderr
+(`>&2`), so only the final `echo "/usr/local/bin/${CUDA_CKPT_NAME}"` reaches
+the caller's command substitution. No other function in the script mixes
+say() and a return-by-echo the same way (checked: find_cuda_checkpoint,
+current_criu_ver, driver_version all either never call say() or don't get
+captured), so this fix is scoped to the one function that had the bug.
+
+None of these four bugs are cosmetic: 1 blocked the whole script from
+running at all; 2a/2b silently discarded a byte-for-byte correct plugin
+build; 3 fed a broken path into the one real proof (--verify) and would
+have reported VERIFY FAILED against a plugin that was actually fine.
+
+------------------------------------------------------------------------------
+2. criu-setup.sh --verify -- CLEAN RUN AFTER THE FOUR FIXES
+------------------------------------------------------------------------------
+    [16:18:29] criu-setup: driver=580.105.08 cache_key=criu4.1.1_driver580.105.08
+    [16:18:29] criu 4.1.1-1build1 already installed (matches pin) -- skip apt
+    [16:18:29] cache hit at /cache/criu-toolchain/criu4.1.1_driver580.105.08
+    [16:18:29]   ABI cross-check ok: every undefined symbol in the plugin
+               (34) is exported by /usr/sbin/criu or a library it links
+    [16:18:29] installed /usr/lib/criu/cuda_plugin.so from cache -- 49768 bytes
+    [16:18:29] cuda-checkpoint: /usr/local/bin/cuda-checkpoint (already in
+               image) -- Version 580.105.08.
+    [16:18:29]   smoke test (--get-state --pid $$): Error getting process
+               state for process ID 18638: "initialization error"
+               (expected -- $$ is not a CUDA process; this is the "runs
+               cleanly on this kernel/driver" proof, not a functional one)
+    [16:18:30] verify: running scripts/criu-matrix.sh arm=plugin under the
+               subreaper (img dir /criu/img/setup-verify)
+        [16:18:38]   criu dump rc=0 in 3.51s  image=3.07 GiB
+        (03.353823) cuda_plugin: finished cuda_plugin stage 0 err 0
+        [16:18:41]   criu restore rc=0 in 3.20s
+        (03.179613) cuda_plugin: finished cuda_plugin stage 2 err 0
+        child output: pre=3.0 cuda=True pid=18806 torch=2.13.0+cu130
+                      post=3.0 (expect 3.0)
+                      VERDICT: IDENTICAL
+    [16:18:45] VERIFY PASSED: plugin ran ('finished cuda_plugin stage 0
+               err 0') and the round-trip was correct (VERDICT: IDENTICAL)
+
+Provenance archived verbatim to crosspod-poda-provenance.txt (plugin sha256
+adcffa579dfa2ce11cff25ba69bd8ddcb2b8a816050d808ba7462cc1892892db, 49768
+bytes, mode 755; cuda-checkpoint Version 580.105.08; driver 580.105.08).
+The 3.1 GiB verify scratch image (/criu/img/setup-verify) was deleted after
+the check -- it is not part of the A1/A2 artifact and would otherwise sit on
+the same nvme volume A1 is about to build into. GPU memory 0/0 MiB after.
+
+------------------------------------------------------------------------------
+3. A1 -- REPLICATION, IMAGE ON LOCAL NVME (IMGROOT=/criu/img, default)
+------------------------------------------------------------------------------
+--probe (sanity, no dump) ran once before the build and showed cumulative
+import cost roughly double the build's own preload (13.14s vs 6.32s) --
+transient node contention at that exact moment, not used for anything below;
+every number that matters is read from the BUILD's own preload, which is
+paired 1:1 with the dump it feeds.
+
+BUILD, once:
+    [16:20:24]   preload ready pid=19037 in 6.54s
+      stage=torch   0.99s  cumulative 0.99s  nvidia_fds=0   rss 0.50GiB
+      stage=vllm    1.76s  cumulative 2.75s  nvidia_fds=0   rss 0.71GiB
+      stage=server  3.57s  cumulative 6.32s  nvidia_fds=11  rss 0.95GiB
+    [16:20:27]   criu dump rc=0 in 3.17s  image=0.59 GiB
+        (03.109218) cuda_plugin: finished cuda_plugin stage 0 err 0
+    dump.log: no `Error (` line. GPU 0/0 MiB after.
+
+MEASURE, interleaved restore/cold/restore/cold, --stage server --tp 1:
+
+    arm       criu restore  -> health_200  -> completion  text
+    -------   ------------  ------------   ------------   --------
+    restore   2.02s         54.47s         55.28s         ' Paris...'
+    cold      n/a           58.40s         59.21s         ' Paris...'
+    restore   2.03s         53.48s         54.30s         ' Paris...'
+    cold      n/a           56.23s         57.04s         ' Paris...'
+
+All four completions are byte-identical (temperature=0, seed=1, same model):
+' Paris.  True or False?  Explain your answer. The statement "The capital
+of France is Paris" is **True**.\n\n**Explanation:**  \nParis' -- coherent,
+and correctness holds across every arm, not just a lucky one.
+
+    TP=1 restore : 53.975s mean (n=2, spread 0.99s)   criu restore 2.025s mean
+    TP=1 cold    : 57.315s mean (n=2, spread 2.17s)
+    win          : 3.34s (5.8%)
+
+ACCOUNTING CHECK: this build's own preload carries 6.32s of imports at a
+2.025s mean restore cost, so the bound is 6.32 - 2.025 = 4.295s. Measured
+win 3.34s is BELOW the bound (closes to within 0.955s, on the conservative
+side) -- consistent, no red flag. It is looser than the original report's
+0.13s closure; section 5 argues why (background load), not why the
+mechanism changed.
+
+restore.log for both restores: no `Error (` line. GPU 0/0 MiB after every
+one of the four arms (checked individually, not just at the end).
+
+------------------------------------------------------------------------------
+4. A2 -- STORAGE ISOLATION, IMAGE ON THE PVC (IMGROOT=/cache/criu-img)
+------------------------------------------------------------------------------
+Fresh build, NOT a copy of A1's nvme image -- this is the artifact a later
+pod B is meant to consume, so it has to be produced by a build whose dump
+wrote directly to the PVC.
+
+BUILD, once, to /cache/criu-img/preboot-server:
+    [16:26:43]   preload ready pid=26297 in 6.53s
+      stage=torch   1.01s  cumulative 1.01s
+      stage=vllm    1.72s  cumulative 2.73s
+      stage=server  3.41s  cumulative 6.14s  nvidia_fds=11  rss 0.95GiB
+    [16:26:46]   criu dump rc=0 in 3.15s  image=0.59 GiB
+        (03.083409) cuda_plugin: finished cuda_plugin stage 0 err 0
+    dump.log: no `Error (` line. GPU 0/0 MiB after.
+
+Image manifest (sha256 of all 48 files + total bytes, taken immediately
+after the build, before any restore touched the directory) written to
+crosspod-image-manifest.txt for pod B to re-verify against. Total
+637,387,847 bytes. Spot re-hash of the three largest/most load-bearing files
+AFTER both A2 restores below matched the manifest exactly (pages-1.img,
+core-26297.img, mm-26297.img) -- restore is read-only on the payload, the
+manifest pod B gets is the same bytes it will restore.
+
+MEASURE, restore/cold/restore (n=2 restores, own fresh colds, never
+rebuilding between restores), --stage server --tp 1, IMGROOT=/cache/criu-img
+for the restores:
+
+    arm       criu restore  -> health_200  -> completion  text
+    -------   ------------  ------------   ------------   --------
+    restore   1.99s         51.38s         52.20s         ' Paris...'
+    cold      n/a           59.91s         60.73s         ' Paris...'
+    restore   2.36s         52.20s         53.01s         ' Paris...'
+    cold      n/a           64.11s         64.92s         ' Paris...'
+
+(cold #2 was an extra sample, run after seeing cold #1 blow through the
+accounting bound below -- see section 5. Not a retry-until-success: both
+cold numbers are reported, and both are used.)
+
+All four completions again byte-identical to A1's and to each other. The
+PVC image restored correctly TWICE from one build with no rebuild between,
+same as A1's nvme image restored twice from one build -- the "one image,
+many restores" property holds on the PVC too.
+
+    TP=1 restore : 51.79s mean (n=2, spread 0.82s)   criu restore 2.175s mean
+    TP=1 cold    : 62.01s mean (n=2, spread 4.20s)
+    win (as measured) : 10.22s (16.5%)
+
+restore.log for both restores: no `Error (` line. GPU 0/0 MiB after every
+arm (one exec produced an unrelated `setpgid: Operation not permitted`
+line from kubectl's own wrapper shell after cold #2 -- cosmetic, GPU memory
+and the next arm's correctness were both unaffected; noted for completeness
+per the "report everything" rule, not because it changed a result).
+
+------------------------------------------------------------------------------
+5. THE A2 WIN VIOLATES ITS OWN ACCOUNTING BOUND -- LOUD FLAG, NOT A RESULT
+------------------------------------------------------------------------------
+This build's own preload carries 6.14s of imports at a 2.175s mean restore
+cost: bound = 6.14 - 2.175 = 3.965s. Measured win was 10.22s -- 6.255s over
+the bound, more than double it. Per the hygiene rule this is being said
+loudly rather than reported as a win: the 10.22s number is NOT believable
+as a measurement of the PVC's effect on cold start, and is not being used
+as one.
+
+What the timestamps show (MEASURED): restore stayed tight and did NOT
+drift across the whole ~12-minute session -- A1's two restores (54.47s,
+53.48s) and A2's two restores (51.38s, 52.20s) all sit within a 3s band,
+in fact A2's (later, on the PVC) were the FASTEST of the four. Cold did
+drift, and only cold: A1's two colds (58.40s, 56.23s) versus A2's two
+colds (59.91s, 64.11s) -- rising, and rising fastest in exactly the window
+(16:28-16:33) where `kubectl get pods` shows a new tenant decode pod
+(optimized-baseline-nvidia-gpu-vllm-decode-...) starting on the same node,
+and node-wide GPU allocation moved from 4/6 to 5/6 (MEASURED, both
+`kubectl describe node` snapshots quoted in section 0).
+
+INFERRED, not measured directly (no iostat/per-tenant I/O accounting was
+run): a cold boot's dominant phase is weight loading from the shared PVC/HF
+cache (environment.txt: ~52% of a TP=1 boot), a multi-GiB read; a restore's
+payload is the 0.59 GiB checkpoint image, roughly an order of magnitude
+smaller and mostly local page cache by the time it's re-read. A second
+tenant's own cold start competing for the same GPFS-backed filesystem would
+hit the COLD arm's large weight read hard while barely touching the
+RESTORE arm's small image -- which is exactly the asymmetry observed
+(restore flat, cold alone rising). This is the most parsimonious
+explanation on hand, but it is inference from a coincidence in timing and
+a plausible mechanism, not a controlled measurement -- flagged as such and
+not folded into the headline numbers.
+
+This is where I got it wrong -- the coordinator called it, correctly, before
+section 8 below existed, and the wrong answer is left in above with its
+refutation rather than quietly deleted. Short version (full re-examination in
+section 8): restore does NOT "barely touch" the weight files. The 0.59 GiB
+image is the CHECKPOINT of the import state, not a substitute for the weight
+read -- a restored process still execs `vllm serve` and still reads the full
+61 GiB from the same GPFS mount cold does. Section 8's restore-3/cold-3 pair,
+run back to back on a quiet node, measured IDENTICAL weight-load times
+(29.05s, both arms, to the hundredth of a second) -- direct evidence against
+the asymmetry this section's mechanism requires.
+
+CONSEQUENCE FOR "does PVC eat the win": the only piece of this comparison
+immune to that confound is criu restore latency itself, which stayed tight
+throughout: nvme 2.025s mean (n=4 across A1) vs PVC 2.175s mean (n=2 in
+A2, but consistent with the two A1-adjacent restores at 1.99s/2.36s showing
+no trend) -- a delta of +0.15s, +7.4%, on a ~2s operation. That does not
+meaningfully eat a 3-4s win. Applying that delta to A1's own numbers as the
+best available estimate: win_PVC (inferred) = imports_carried(6.14s) -
+restore_PVC(2.175s) = 3.965s, the same order as A1's directly measured
+3.34s. That is an inference from the bound, explicitly not a second
+independent cold-control measurement, because A2's own cold arms are
+contaminated and cannot supply one in this session.
+
+------------------------------------------------------------------------------
+6. RESULTS TABLE, EVERYTHING TOGETHER
+------------------------------------------------------------------------------
+  arm         storage  n   mean health_200  spread   criu restore mean
+  ----------  -------  --  ---------------  -------  ------------------
+  A1 restore  nvme     2   53.975s          0.99s    2.025s
+  A1 cold     nvme     2   57.315s          2.17s    n/a
+  A2 restore  PVC      2   51.79s           0.82s    2.175s
+  A2 cold     PVC      2   62.01s           4.20s    n/a    (CONTAMINATED,
+                                                              see section 5)
+
+  A1 win (measured, trustworthy)          : 3.34s  (bound 4.295s, closes)
+  A2 win (measured, NOT trustworthy)      : 10.22s (bound 3.965s, VIOLATED)
+  restore-cost delta, PVC vs nvme         : +0.15s (+7.4%), small
+  win_PVC (inferred from the bound, not
+    from an independent cold control)     : ~3.97s, same order as A1
+
+Original 4.07s (single earlier session, reports/criu-cuda-checkpoint.txt) is
+NOT compared to any number above -- per the hygiene rule, only arms from
+this same pod session are compared to each other. This session's own
+replication of the technique (A1) landed at 3.34s with a bound of 4.295s;
+whether that is "the same" 4.07s effect under heavier background load, or a
+mildly smaller true effect, cannot be separated from the node's shared-
+tenant noise with the data collected here.
+
+------------------------------------------------------------------------------
+7. NOT VERIFIABLE / NOT DONE IN THIS SESSION
+------------------------------------------------------------------------------
+  * A clean, uncontaminated A2 (PVC) cold control -- both samples collected
+    were hit by the confound in section 5. A third sample, or a sample
+    collected while confirming node allocation is unchanged start-to-finish,
+    would be needed before reporting a PVC-specific win number directly.
+  * Any cross-pod restore. This session (pod A) only established a same-pod
+    PVC baseline and produced+manifested the artifact; whether the image
+    restores in a DIFFERENT pod (pod B, same or different node) is
+    explicitly out of scope here and untested.
+  * Per-tenant I/O accounting on the shared node/filesystem -- the
+    mechanism proposed in section 5 (competing PVC reads) is inferred from
+    timing coincidence and the environment.txt phase breakdown, not from a
+    direct measurement of the other tenant's I/O.
+  * TP=2 was not re-run in this session (the original report's TP=2 numbers
+    are also not compared to anything here, for the same reason as TP=1).
+
+------------------------------------------------------------------------------
+8. STATE AT END OF SESSION
+------------------------------------------------------------------------------
+Pod vllm-coldstart: Running, node pokprod-b93r39s1, left running per
+instructions. GPUs: 0/0 MiB. criu images on disk: /criu/img/preboot-server
+(nvme, A1's build) and /cache/criu-img/preboot-server (PVC, A2's build,
+manifested in crosspod-image-manifest.txt) -- both intact, neither rebuilt
+after their respective manifests/first restores. /cache/criu-toolchain
+holds the cached plugin build (criu4.1.1_driver580.105.08) for a fast
+second setup. scripts/criu-setup.sh in the repo carries all four fixes from
+section 1; no other repo file was modified; nothing was committed.
+
+------------------------------------------------------------------------------
+8. RE-EXAMINATION OF SECTION 5, DIRECTED BY THE COORDINATOR (2026-09-08, pod A
+   still up, same PVC image, no rebuild)
+------------------------------------------------------------------------------
+The coordinator's objection to section 5, verbatim in substance: the restore
+arm loads the same 61 GiB of weights the cold arm does (the --stage server
+image carries imports only, no engine, no weights), so filesystem contention
+on that read should hit both arms in the same phase -- it cannot easily
+produce restore-flat / cold-alone-rising. Alternative offered: CPU/scheduling
+contention (competing tenant, node GPU alloc 4/6 -> 5/6 mid-session) inflating
+cold's ~6.1s import phase specifically, the one thing cold does that restore
+skips. Also flagged: the accounting bound in section 5 used the BUILD-time
+import constant (6.14s), not each cold arm's OWN measured import cost.
+
+Four things were done in response, in the order the coordinator asked for.
+
+8.1 WHAT SURVIVED FROM THE ORIGINAL SESSION (instruction #2, "if the logs
+    needed for this weren't retained, say so plainly")
+------------------------------------------------------------------------------
+scripts/criu-preboot.sh writes every arm's full vLLM stdout to ONE FIXED path,
+/tmp/preboot.log -- each new arm overwrites the previous arm's log in place.
+Only the LAST arm of the whole original session was still sitting in the pod
+when this re-examination started. That was a2-cold-2. Its full log was
+recovered (`kubectl exec ... cat /tmp/preboot.log`) before anything else could
+overwrite it.
+
+Stated plainly, per the coordinator's instruction: a1-cold-1, a1-cold-2,
+a1-restore-1, a1-restore-2, a2-cold-1 and a2-restore-1 have NO internal phase
+breakdown available -- only the wrapper's own summary lines survive for them
+(T-anchor, health_200, criu-restore cost where applicable). Their real
+imports-phase cost is NOT retained and cannot be recovered. Only a2-cold-2
+carries real internal timing from the original session.
+
+8.2 TWO NEW ARMS, SAME IMAGE, NO REBUILD (instruction #2)
+------------------------------------------------------------------------------
+Ran restore then cold, interleaved, on the existing A2 (PVC) --stage server
+image, full vLLM stdout captured for both this time (copied off to a distinct
+path before the next arm could overwrite /tmp/preboot.log):
+
+  restore-3: T=16:49:21  criu restore rc=0 in 2.94s  health_200 56.16s
+  cold-3:    T=16:50:26                              health_200 58.59s
+
+Both full logs recovered intact.
+
+8.3 CONTENTION INSTRUMENTED DIRECTLY, NOT INFERRED (instruction #3)
+------------------------------------------------------------------------------
+Before/after both new arms (in-pod snapshot, see reports/criu-raw for the raw
+pair-output):
+
+  loadavg   : 0.49 1.10 2.31  ->  1.57 1.31 2.30  ->  1.72 1.40 2.26
+  cpu.stat  : nr_periods=0 nr_throttled=0 throttled_usec=0, UNCHANGED across
+              every snapshot -- this pod's own CFS quota was never hit
+  gpu       : 0 MiB / 0 MiB on both devices at every snapshot, node GPU alloc
+              stable across the whole pair
+  decode pod: present, age stable (not mid-restart) during this window
+
+Two direct limitations, stated plainly rather than glossed over:
+  * /proc/pressure/cpu is not mounted/enabled in this container -- PSI, which
+    would show node-wide scheduling pressure directly, was not available at
+    any point in this investigation, original session or this one.
+  * `cat /sys/fs/cgroup/cpu.max` returned exit 1 (permission), so the actual
+    CFS quota/period numbers behind the "16 cores" request/limit could not be
+    read from inside the pod -- only cpu.stat's throttling counters, which are
+    a consequence of the quota, not the quota itself.
+  * `cpuset.cpus.effective` reads `0-223` (the full node range) and `nproc`
+    reads 16 -- this node is NOT running the "static" CPU Manager policy, so
+    the pod's Guaranteed-QoS 16-core request is a CFS quota ceiling only, not
+    exclusive physical cores. Genuine scheduling contention for shared
+    physical cores with other pods remains structurally possible even with
+    nr_throttled=0 on this pod's own quota. This is a real finding, not
+    inference: it is what makes the coordinator's mechanism physically
+    possible on this node.
+  * None of this instrumentation existed live during the ORIGINAL session's
+    cold-1/cold-2 windows -- the past cannot be re-instrumented. Everything in
+    this subsection is about the CURRENT node state, used as a reference
+    point, not a replay of conditions at 16:28-16:33 on 2026-09-04(sic, see
+    section 0 for the actual date)/whenever the original arms ran.
+
+8.4 REAL PHASE BREAKDOWN, THREE SAMPLES WITH FULL LOGS
+------------------------------------------------------------------------------
+Timestamps read directly from vLLM's own structured stdout (HH:MM:SS lines),
+not estimated:
+
+  phase                        a2-cold-2   a2-cold-3   a2-restore-3
+  ---------------------------  ----------  ----------  -------------
+  T (arm start)                16:31:56    16:50:26    16:49:21
+  criu restore                 n/a         n/a         2.94s (done 16:49:24)
+  imports (T -> first log)     8.0s        7.0s        n/a (checkpointed)
+  first log -> loading start   7s          6s          7s   (EngineCore's
+                                                              OWN fresh
+                                                              import+init --
+                                                              the checkpoint
+                                                              only carries the
+                                                              APIServer side)
+  "Loading weights took ..."   31.40s      29.05s      29.05s
+  model loading, total         33.71s      30.60s      31.23s
+  graph capturing finished     11s         11s          10s
+  init engine (...) took       14.84s      14.28s       14.38s
+  measured health_200          64.11s      58.59s       56.16s
+
+Two findings fall directly out of this table:
+
+  1. Weight-load is IDENTICAL between restore and cold under matched (clean)
+     conditions -- 29.05s, both arms, to the hundredth of a second. This
+     directly falsifies the literal mechanism proposed in section 5 (restore
+     "barely touching" the weight read): restore pays the full 61 GiB read,
+     same as cold, same cost, when node conditions are the same. The
+     coordinator's objection was correct on this point.
+
+  2. cold-2 was not slow in one concentrated phase -- it was mildly slow
+     EVERYWHERE relative to the clean cold-3 sample: +1.0s imports, +1.0s
+     setup, +2.35s weight-load, +0.56s init-engine, summing to ~4.9s against
+     an observed total gap of 5.52s (64.11 - 58.59). That is a roughly
+     phase-uniform slowdown, not an imports-only one. It is consistent with
+     the coordinator's proposed MECHANISM (CPU/scheduling contention, which
+     touches every phase that does CPU work: import, deserialize, memcpy,
+     kernel-launch overhead for graph capture) but it is not what "CPU
+     contention inflates the ~6s import phase" alone predicts as a full
+     explanation, because imports contributed only ~1s of the ~5.5s gap.
+
+8.5 PER-ARM ACCOUNTING BOUND, RECOMPUTED WITH EACH ARM'S OWN IMPORTS WHERE
+    THAT DATA EXISTS (instruction #1)
+------------------------------------------------------------------------------
+  pair                  imports source          imports  criu    bound   win     closes?
+  --------------------  ----------------------  -------  ------  ------  ------  -------
+  A1 restore-1/cold-1   build-time (ESTIMATE,    6.32s    2.02s   4.30s   3.93s   yes (margin 0.37s)
+                          no log survived)
+  A1 restore-2/cold-2   build-time (ESTIMATE,    6.32s    2.03s   4.29s   2.75s   yes (margin 1.54s)
+                          no log survived)
+  A2 restore-1/cold-1   build-time (ESTIMATE,    6.14s    1.99s   4.15s   8.53s   NO (over by 4.38s)
+                          no log survived)
+  A2 restore-2/cold-2   OWN MEASURED (recovered  8.00s    2.36s   5.64s   11.91s  NO (over by 6.27s)
+                          log, this section)
+  A2 restore-3/cold-3   OWN MEASURED (new arms,  7.00s    2.94s   4.06s   2.43s   yes (margin 1.63s)
+                          this section)
+
+Using each cold arm's OWN measured imports, where that data actually exists,
+raises the bound for restore-2/cold-2 from the section-5 figure of 3.965s to
+5.64s -- the coordinator's instruction #1 correction is real and the imports
+phase genuinely was inflated (8.00s vs a 6.14s build baseline, +30%). But the
+corrected bound is STILL violated, by 6.27s, more than the size of the
+correction itself. Imports inflation is real; it is not sufficient, by
+itself, to make the A2/cold-2 win believable.
+
+The new restore-3/cold-3 pair, collected under an instrumented, apparently-
+quiet node, closes comfortably against its own measured bound. This is the
+clean control the original session lacked (section 7 called this out as not
+done; it is now done).
+
+One more finding that section 5 did not have and that complicates a tidy
+verdict: restore-3 (56.16s) is 3.96-4.78s SLOWER than both of the original
+A2 restores (51.38s, 52.20s) even though 8.3's instrumentation shows this
+window as quiet. Restore is not perfectly flat either -- the "restore stayed
+tight, only cold drifted" claim in section 5 was true of that session's n=2
+per arm, but a third PVC restore sample breaks the pattern by more than the
+imports-inflation correction itself. Something on the order of 4-5s of
+run-to-run variation exists on this node/filesystem that neither hypothesis
+predicts and that this investigation's instrumentation (loadavg, cpu.stat,
+GPU alloc, no PSI) does not explain.
+
+8.6 VERDICT
+------------------------------------------------------------------------------
+The coordinator asked explicitly: if the evidence cannot separate the two
+hypotheses, say so rather than picking one to be tidy. It cannot, cleanly.
+What the evidence supports, plainly:
+
+  * Section 5's SPECIFIC MECHANISM -- "restore barely touches the weight
+    read, only cold does the big one" -- is FALSIFIED. 8.4's restore-3/cold-3
+    pair shows identical weight-load cost on both arms when conditions match.
+    Retracted; left in place above with this refutation per the house
+    convention (reports/criu-cuda-checkpoint.txt's NVML section).
+
+  * The coordinator's MECHANISM -- CPU/scheduling contention, not filesystem-
+    type asymmetry -- is well-supported structurally (8.3: no static CPU
+    Manager pinning on this node, so the 16-core Guaranteed request is a
+    quota ceiling, not exclusive cores) and partially supported quantitatively
+    (8.4: cold-2's imports phase really was inflated, +30% over baseline).
+
+  * But the coordinator's mechanism, taken as a FULL explanation for the A2
+    win violating its bound, does not arithmetically close either: even
+    cold-2's own real, inflated imports (8.00s) only raises the bound to
+    5.64s against an 11.91s win -- a 6.27s residual that inflated imports
+    alone cannot account for. And that residual is not concentrated in
+    imports when compared to the clean cold-3 control -- it is spread fairly
+    evenly across every phase of the boot (8.4, finding 2), which argues for
+    a general contention effect touching the whole process rather than one
+    specifically privileging the import phase.
+
+  * A ~4-5s band of unexplained run-to-run variation showed up in restore
+    itself (8.5) under conditions this session's instrumentation reads as
+    quiet, which neither hypothesis predicts and which this investigation
+    cannot attribute to anything specific.
+
+VERDICT: (c), not (a) or (b) as either was originally stated. The direction of
+the coordinator's mechanism is right and the specific mechanism in section 5
+is wrong and is retracted. But the coordinator's mechanism, quantified
+against the one pair where real numbers exist (restore-2/cold-2), explains
+roughly a third of the bound violation (imports: +1.86s of a 6.27s residual
+after the corrected bound) and leaves most of it unaccounted for, spread
+across phases restore also performs identically when uncontended. The honest
+statement is: something real and reproducible degraded A2's original cold
+arms, it looks like general CPU/scheduling contention rather than filesystem-
+type asymmetry (section 5's mechanism is dead), but this investigation cannot
+fully quantify it, cannot rule out an additional unidentified contributor,
+and turned up a comparable-magnitude noise floor in restore that undercuts
+how tightly ANY single pair from n=2 should be trusted on this shared node.
+The A2 win of 10.22s/11.91s remains NOT reportable as a PVC-specific result,
+now for a better-understood but not fully closed reason than section 5 gave.
+
+8.7 WHAT IS STILL NOT VERIFIABLE
+------------------------------------------------------------------------------
+  * a1-cold-1, a1-cold-2, a1-restore-1, a1-restore-2, a2-cold-1, a2-restore-1:
+    no internal phase breakdown, unrecoverable (8.1). Their row in 8.5 uses
+    the build-time constant, explicitly marked ESTIMATE, not MEASURED.
+  * Whether restore's own weight-load phase was elevated during the ORIGINAL
+    contended window (restore-1/restore-2) cannot be checked -- their full
+    logs are gone. Only restore-3, a same-day but different-window sample, is
+    available as a reference for "what restore's weight-load normally costs."
+  * The ~4-5s unexplained gap between restore-3 and the original PVC restores
+    is not attributed to anything specific; PSI unavailability means node-wide
+    scheduling pressure could never be read directly, in either session.
+  * Per-tenant I/O accounting on the shared GPFS mount was still not run in
+    this session either -- the revised verdict rests on CPU/scheduling
+    evidence (cpuset, loadavg, cpu.stat) and phase-timing arithmetic, not on
+    direct storage-layer contention measurement.
+
+Pod A (vllm-coldstart, lionel-cold-start) was left running throughout and is
+confirmed Running at the end of this section.
+------------------------------------------------------------------------------

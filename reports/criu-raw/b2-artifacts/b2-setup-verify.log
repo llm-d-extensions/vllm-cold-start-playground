@@ -1,0 +1,85 @@
+[17:40:57] criu-setup: driver=580.105.08  cache_key=criu4.1.1_driver580.105.08  cache_root=/cache/criu-toolchain
+[17:40:57] criu 4.1.1-1build1 already installed (matches pin) -- skipping apt
+[17:40:57] cache hit at /cache/criu-toolchain/criu4.1.1_driver580.105.08 -- verifying before trusting it
+[17:40:57]   /cache/criu-toolchain/criu4.1.1_driver580.105.08/cuda_plugin.so : 49768 bytes, mode 755 (original build was 49768 bytes, mode 755 -- size will drift with compiler/libc, mode should not)
+[17:40:57]   ABI cross-check ok: every undefined symbol in the plugin (34) is exported by /usr/sbin/criu or a library it links
+[17:40:57] installed /usr/lib/criu/cuda_plugin.so from cache (no compile) -- 49768 bytes
+[17:40:57] cuda-checkpoint already present in the image at /usr/local/bin/cuda-checkpoint
+[17:40:57] cuda-checkpoint: /usr/local/bin/cuda-checkpoint (already in image) -- Version 580.105.08.
+[17:40:58]   smoke test (--get-state --pid $$): Error getting process state for process ID 530: "initialization error"
+[17:40:58] criu check --all (INFORMATIONAL ONLY -- see the trap in this script's header:
+[17:40:58]   cr_plugin_init() never runs here, so this cannot confirm the plugin loads)
+    Warn  (criu/kerndat.c:1285): Can't keep kdat cache on non-tempfs
+    Error (criu/cr-check.c:1553): unmatched dev:ino 0:25e:9 (expected 0:270:9)
+    Looks good but some kernel features are missing
+    which, depending on your process tree, may cause
+    dump or restore failure.
+[17:40:58] verify: running scripts/criu-matrix.sh arm=plugin under the subreaper (img dir /criu/img/setup-verify)
+    [reaper] subreaper armed, pid=650
+    ==================================================================
+    CRIU x cuda-checkpoint matrix
+    criu    : Version: 4.1.1
+    cc      : Version 580.105.08.
+    torch   : 2.13.0+cu130
+    kernel  : 5.14.0-570.64.1.el9_6.x86_64
+    caps    : 000001ffffffffff  seccomp=0
+    gpu     : 0 MiB 0 MiB 
+    arms    : plugin
+    ==================================================================
+    
+    [17:41:01] ################ arm: plugin
+    [17:41:01]   cuda-checkpoint visible: /usr/local/bin/cuda-checkpoint
+    [17:41:01]   plugin dir: cuda_plugin.so 
+    [17:41:03]   child pid=698  rss=0.66 GiB  gpu=2773 MiB 4 MiB 
+    [17:41:03]   /dev/nvidia* fds=36  nvidia maps=120
+    [17:41:03]   cuda state=running
+    [17:41:03]   NOT calling cuda-checkpoint by hand -- criu owns that decision now
+    [reaper] reaped orphan 698
+    [17:41:06]     criu dump rc=0 in 2.95s  image=3.07 GiB (3297743331 B)
+    [17:41:06]   process gone after dump? yes  gpu=0 MiB 0 MiB 
+    [17:41:06]   plugin trace in dump.log:
+          (01.287553) Dumping path for -3 fd via self 12 [/usr/local/lib/python3.12/dist-packages/cuda/bindings/cyruntime.cpython-312-x86_64-linux-gnu.so]
+          (01.287566) Handling VMA with the following smaps entry: 7f5ecb0b8000-7f5ecb0c4000 r-xp 00006000 103:09 1481753215                /usr/local/lib/python3.12/dist-packages/cuda/bindings/cyruntime.cpython-312-x86_64-linux-gnu.so
+          (01.287579) Handling VMA with the following smaps entry: 7f5ecb0c4000-7f5ecb0cf000 r--p 00012000 103:09 1481753215                /usr/local/lib/python3.12/dist-packages/cuda/bindings/cyruntime.cpython-312-x86_64-linux-gnu.so
+          (01.287584) Handling VMA with the following smaps entry: 7f5ecb0cf000-7f5ecb0d0000 r--p 0001c000 103:09 1481753215                /usr/local/lib/python3.12/dist-packages/cuda/bindings/cyruntime.cpython-312-x86_64-linux-gnu.so
+          (01.287589) Handling VMA with the following smaps entry: 7f5ecb0d0000-7f5ecb0d2000 rw-p 0001d000 103:09 1481753215                /usr/local/lib/python3.12/dist-packages/cuda/bindings/cyruntime.cpython-312-x86_64-linux-gnu.so
+          (01.290617) Dumping path for 1 fd via self 15 [/tmp/c_plugin.log]
+          (01.290620) Only file size could be stored for validation for file /tmp/c_plugin.log
+          (02.905136) cuda_plugin: finished cuda_plugin stage 0 err 0
+    [17:41:09]     criu restore rc=0 in 2.87s
+    [17:41:09]   restored pid=698  state=running  gpu=2773 MiB 4 MiB   rss=0.46 GiB
+    [17:41:09]   plugin trace in restore.log:
+          (00.093790) Collected [tmp/c_plugin.log] ID 0x50
+          (00.093807) unix:  `- Got id 0x57 ino 196475026 type SOCK_SEQPACKET state TCP_LISTEN peer 0 (name @cuda-uvmfd-4026555007-698@ dir -)
+          (00.095959)    698: File tmp/c_plugin.log could only be validated with file size
+          (00.105169)    698: File usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so could only be validated with file size
+          (01.375780) plugin: `cuda_plugin' hook 9 -> 0x7f4fe8a07ce3
+          (01.860749) cuda_plugin: resuming devices on pid 698
+          (01.860779) cuda_plugin: Restore thread pid 718 found for real pid 698
+          (02.850735) cuda_plugin: finished cuda_plugin stage 2 err 0
+    [reaper] reaped orphan 698
+    [17:41:10]   child output:
+          pre=3.0 cuda=True pid=698 torch=2.13.0+cu130
+          post=3.0 (expect 3.0)
+          VERDICT: IDENTICAL
+    
+    [17:41:12] done. gpu=0 MiB 0 MiB   images under /criu/img/setup-verify:
+      3.1G	/criu/img/setup-verify/plugin
+[17:41:12] VERIFY PASSED: plugin ran ('finished cuda_plugin stage 0 err 0' in /criu/img/setup-verify/plugin/dump.log) and the round-trip was correct (VERDICT: IDENTICAL)
+=== criu-setup provenance (2026-09-08T17:41:12Z) ===
+host (pod)        : vllm-coldstart-b
+kernel             : 5.14.0-570.64.1.el9_6.x86_64
+criu version       : Version: 4.1.1
+criu path          : /usr/sbin/criu (never replaced by this script)
+plugin path        : /usr/lib/criu/cuda_plugin.so
+plugin size        : 49768 bytes
+plugin mode        : 755
+plugin mtime       : 2026-09-08 17:40:57.775273332 +0000
+plugin sha256      : adcffa579dfa2ce11cff25ba69bd8ddcb2b8a816050d808ba7462cc1892892db
+plugin source      : cache (/cache/criu-toolchain/criu4.1.1_driver580.105.08)
+cache key          : criu4.1.1_driver580.105.08
+cuda-checkpoint    : /usr/local/bin/cuda-checkpoint (already in image)
+cuda-checkpoint ver: Version 580.105.08.
+driver version     : 580.105.08
+verify (--verify)  : PASSED
+[17:41:12] provenance written to /var/log/coldstart/criu-setup-provenance.txt

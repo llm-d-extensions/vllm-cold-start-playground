@@ -1,0 +1,8 @@
+[reaper] subreaper armed, pid=1160
+[17:28:29] arm=restore tp=1  gpu=0, 0 MiB 1, 0 MiB 
+[17:28:29]   evicted 0.59 GiB
+[reaper] reaped orphan 26297
+[17:28:29]   criu restore rc=1 in 0.14s
+      (00.126203)  26297: Error (criu/files-reg.c:2153): File usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0 has bad build-ID
+      (00.126208)  26297: Error (criu/mem.c:1424): `- Can't open vma
+      (00.126232) Error (criu/cr-restore.c:2320): Restoring FAILED.
