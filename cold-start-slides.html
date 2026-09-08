@@ -1146,6 +1146,53 @@ table.data tr:last-child td{border-bottom:none;}
   </div>
 </section>
 
+<!-- Slide 13b: Launcher-fronted boot vs. a tuned standalone -->
+<section class="slide">
+  <h2>Part 2 &middot; The actuation launcher</h2>
+  <h1>Fronting vLLM with a launcher: 89.2s &rarr; 33.9s (&minus;62%) at TP=1 &mdash; then checked against a tuned standalone</h1>
+  <div class="content">
+    <div class="tp-row">
+      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">TP=1, launcher</span><span class="val">33.9s</span><span class="unit">from 89.2s naive &middot; &minus;62%</span></div>
+      <div class="tp-badge tp2"><span class="dot"></span><span class="lbl">TP=2, launcher</span><span class="val">70.5s</span><span class="unit">from 96.0s naive &middot; &minus;27%</span></div>
+      <div class="tp-badge gap"><span class="dot"></span><span class="lbl">vs. tuned standalone</span><span class="val">+3s / &minus;17s</span><span class="unit">TP=1 ahead, TP=2 behind &mdash; see below</span></div>
+    </div>
+
+    <div class="section-title">Same fork+loader ladder, run through <span class="cite">llm-d-incubation/llm-d-fast-model-actuation</span>'s launcher &middot; Qwen3-32B, TP=1, warm reuse (launch #1) &middot; <a class="cite" href="reports/launcher-cold-start-tp1-tp2.md#tp1">reports/launcher-cold-start-tp1-tp2.md#TP=1</a></div>
+    <div class="bar-list" id="launcherbars"></div>
+    <small class="note">A→C (89.2&rarr;58.1s, &minus;31.1s) costs zero vLLM changes &mdash; it's entirely how the launcher
+    creates its child. The stock launcher already imports vLLM at module load and forks; a synthetic
+    <span class="cite">cold-import</span> variant (imports moved inside the launch call, arm A) exists only to price
+    that design. D&rarr;E is the same loader swap as the standalone ladder, stacked on top. Raw per-launch JSON:
+    <a class="cite" href="scripts/launcher/results/tp1C.json">tp1C</a>,
+    <a class="cite" href="scripts/launcher/results/tp1D.json">tp1D</a>,
+    <a class="cite" href="scripts/launcher/results/tp1E.json">tp1E</a>.json (A/B predate the JSON dump; see the report table).</small>
+
+    <div class="section-title" style="margin-top:24px;">Is the launcher worth it, or just a well-tuned <span class="cite">vllm serve</span>? Same pod, same model, same t0 &middot; <a class="cite" href="reports/launcher-cold-start-tp1-tp2.md#launcher-vs-tuned-standalone-the-is-the-launcher-even-worth-it-check">reports/launcher-cold-start-tp1-tp2.md &mdash; Launcher vs. tuned standalone</a></div>
+    <table class="data">
+      <tr><th></th><th>best TP=1</th><th>best TP=2</th></tr>
+      <tr><td>tuned standalone <span class="cite">vllm serve</span> (this deck, Part 1)</td><td class="strong"><a class="cite" href="reports/lt1-it-c2-instanttensor.txt">36.9s</a></td><td class="strong">53.5s <span class="cite">(runs/lt2-it-c2, not committed)</span></td></tr>
+      <tr><td>this launcher (warm-import + fork + instanttensor)</td><td class="strong"><a class="cite" href="scripts/launcher/results/tp1E.json">33.9s</a></td><td class="strong"><a class="cite" href="scripts/launcher/results/tp2E.json">70.5s</a></td></tr>
+      <tr><td>launcher's net advantage</td><td class="strong" style="color:var(--good)">~3s</td><td class="strong" style="color:var(--critical)">none &mdash; 17s slower</td></tr>
+    </table>
+
+    <div class="gap-box" style="border-style:solid;"><b>At TP=2, the same fork veto seen on the standalone TP=2 slide fires inside the launcher too:</b>
+    once CUDA is initialized in the parent, vLLM overrides <span class="cite">VLLM_WORKER_MULTIPROC_METHOD</span> back to
+    <span class="cite">spawn</span> &mdash; <span class="cite">system_utils.py:157</span>, "Reasons: CUDA is initialized." The
+    launcher's warm-import still saves the API server its own imports (~12s), but <b>EngineCore and both TP workers
+    still spawn and re-import</b>, so the launcher carries none of the standalone deck's TP=2-specific tuning and
+    ends up behind it. Do not read this launcher as a TP=2 speedup. Full arm table:
+    <a class="cite" href="reports/launcher-cold-start-tp1-tp2.md#tp2">reports/launcher-cold-start-tp1-tp2.md#TP=2</a>.</div>
+
+    <p class="lede" style="margin-top:14px; font-size:15px;"><b>So what is a permanent launcher actually for?</b> Not
+    per-boot latency &mdash; a standalone process with a warm bytecode cache already imports cheaply, so fork
+    inheritance only claws back what little is left. The real case is operational: the launcher is a resident
+    process that owns instance lifecycle (create / health / delete), amortizes its own ~16s warm-import boot to
+    zero across every subsequent launch, and gives every launch a shared, already-warm cache for free &mdash; the
+    model registry, <span class="cite">torch.compile</span> artifacts, and the node's page cache all carry over
+    between launches the way they never do between separate standalone processes.</p>
+  </div>
+</section>
+
 <!-- Slide 14: What's not upstreamed (Part 2) -->
 <section class="slide">
   <h2>Part 2 &middot; Upstream status</h2>
@@ -1486,6 +1533,28 @@ table.data tr:last-child td{border-bottom:none;}
     ];
     rows.forEach(function(r){
       wrap.appendChild(barRow(r[0], r[1], r[2], r[3], r[4]/max*100, r[5], r[6], r[7]));
+    });
+  })();
+
+  /* ---------- Slide 13b: launcher ladder bars ---------- */
+  (function(){
+    var wrap = document.getElementById('launcherbars');
+    if (!wrap) return;
+    var max = 89.2;
+    var rows = [
+      ['A &middot; cold-import launcher, spawn', '<br><a class="cite" href="reports/launcher-cold-start-tp1-tp2.md#tp1">report &mdash; arm A</a> &middot; synthetic naive baseline', '89.2s', '&mdash;', 89.2, 'var(--s4)',
+       'Every child re-imports torch+vllm from scratch, same as a bare vllm serve with no warm bytecode cache.'],
+      ['B &middot; warm-import launcher, spawn', '<br><a class="cite" href="reports/launcher-cold-start-tp1-tp2.md#tp1">report &mdash; arm B</a>', '72.1s', '&minus;17.1s', 72.1, 'var(--seq300)',
+       'The launcher imports the vLLM server stack at module load; a forked API server would inherit it, but this arm still spawns the EngineCore, which re-imports torch+vllm in a fresh interpreter (~18s gap between fork and "Initializing a V1 LLM engine").'],
+      ['C &middot; warm-import launcher, fork', '<br><a class="cite" href="scripts/launcher/results/tp1C.json">tp1C.json</a>', '58.1s', '&minus;31.1s vs. A', 58.1, 'var(--seq400)',
+       'MULTIPROC_METHOD=fork: the EngineCore now inherits the already-imported interpreter instead of re-importing it. No vLLM code changed &mdash; this is entirely the launcher\'s own design.'],
+      ['D &middot; + --load-format fastsafetensors', '<br><a class="cite" href="scripts/launcher/results/tp1D.json">tp1D.json</a>', '45.4s', '&minus;43.8s vs. A', 45.4, 'var(--seq450)',
+       'Weight load ~30s &rarr; ~19s. In-image, ships with vLLM.'],
+      ['E &middot; + --load-format instanttensor', '<br><a class="cite" href="scripts/launcher/results/tp1E.json">tp1E.json</a>', '33.9s', '&minus;55.3s vs. A', 33.9, 'var(--good)',
+       'Weight load ~19s &rarr; ~8s (measured ~9 GiB/s). Fastest loader tested at TP=1; pip-installed (vllm[instanttensor]), not in the base image. Best measured number.']
+    ];
+    rows.forEach(function(r){
+      wrap.appendChild(barRow(r[0], r[1], r[2], r[3], r[4]/max*100, r[5], r[0], r[6]));
     });
   })();
 
