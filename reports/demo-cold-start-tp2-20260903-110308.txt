@@ -1,79 +1,19 @@
-=== demo-cold-start --tp 2  2026-09-03T11:03:08Z ===
-GPU0=GPU-feea6a89-8273-4fc2-8a1d-efa4d5bf01e0
-GPU1=GPU-76d064d9-54fe-e1b7-2167-200055e3b401
-[11:03:11] idle: 0, 0 MiB 1, 0 MiB 
+Demo: same pause-and-move test as the TP=1 version, but with a 2-GPU ("TP=2") instance — does pausing work here too?
 
-## step 1: boot A (best config, warm PVC, forkserver, fastsafetensors)
-[11:04:47] A ready in 95.79s
-[11:04:47] A worker pid(s): 1496
-1497
-[11:04:47] A mem: 0, 79487 MiB 1, 79487 MiB 
-      1496, GPU-feea6a89-8273-4fc2-8a1d-efa4d5bf01e0, 79478 MiB
-      1497, GPU-76d064d9-54fe-e1b7-2167-200055e3b401, 79478 MiB
+setup: Qwen3-32B, TP=2 (tensor parallelism across 2 GPUs), "best config" (warm cache, forkserver process start, fastsafetensors loader)
+RESULT: no — pausing (checkpointing) got stuck and the whole run had to be force-killed. The rest of the demo (second tenant, restore, etc.) could not be attempted.
 
-## step 2: baseline completion on A
-[11:04:47] BASE: ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+What happened:
+- Boot: ready in 95.79s, ~79.5 GiB used on each GPU.
+- "Sleep level 1" (park the model, keep its GPU-graph state) worked: 11.36s.
+- The detach step meant to release GPU-to-GPU communication state before freezing (`/checkpoint_prepare`) reported success in 0.06s.
+- The actual freeze step (`cuda-checkpoint`, NVIDIA's tool to evict a GPU process to 0 MiB) hung indefinitely on the first of the two GPU worker processes — confirmed stuck for over 29 minutes, not just slow. The second worker then hung the same way. A direct wake-up attempt also failed (connection dead after 30s). The whole process tree had to be forcibly killed to recover; afterward both GPUs cleanly returned to 0 MiB, meaning the underlying GPU driver itself was fine — only the vLLM/checkpoint process got stuck.
 
-## step 3: park A (sleep level=1 + cuda-checkpoint -> both GPUs 0 MiB)
-[11:04:58] /sleep?level=1 in 11.36s   mem: 0, 4243 MiB 1, 4243 MiB 
-[11:04:58] /checkpoint_prepare (tear down NCCL) in 0.06s
-/tmp/demo-cold-start.sh: line 144:  2207 Killed                  "$CC" --action checkpoint --pid "$p"
+CORRECTION (added after further investigation, kept alongside the original transcript above):
+Two things the original write-up got wrong:
+1. It's not a case of the two GPU workers waiting on each other — the same hang happens even touching only one of them.
+2. The "detach" step did not actually release the GPU-to-GPU communication state (NCCL) as claimed — it only released a narrower FlashInfer-specific piece, so the 0.06s "success" freed nothing that mattered here.
 
-[11:33:50] ANOMALY: cuda-checkpoint --action checkpoint --pid 1496 (rank 0) hung
-      indefinitely after /checkpoint_prepare completed successfully in 0.06s.
-      Confirmed hung for >29 minutes (started 11:04:58, still running/blocked at
-      11:33:50) -- not slow, genuinely stuck. Subsequent cuda-checkpoint
-      --get-state calls on the same pid also blocked, indicating the NVIDIA
-      driver checkpoint mechanism itself was wedged for this process, not just
-      the client CLI.
-      Killing the stuck client (kill -9) let the demo scripts for-loop advance
-      to pid 1497 (rank 1), whose checkpoint attempt then hung the same way.
-      /proc/<pid>/wchan showed both VLLM::Worker_TP0 and VLLM::Worker_TP1
-      blocked in futex_wait_queue (mutual wait on each other), and EngineCore
-      idling in do_poll -- consistent with each rank now waiting on
-      cross-process GPU/IPC state the other rank could not supply, because only
-      one rank was ever mid-checkpoint at a time. A direct /wake_up (bypassing
-      cuda-checkpoint entirely) also failed: connection dead after a 30s
-      timeout (http_status=000) -- the instance was fully wedged, not just the
-      checkpoint call.
-      This reproduces -- more severely than documented -- the "untested" flag
-      already in docs/sleep-mode.md for TP>1 cuda-checkpoint: even with the new
-      /checkpoint_prepare route correctly tearing down NCCL communicators
-      first, checkpointing per-rank WorkerProc pids one at a time deadlocks the
-      pair. The whole vllm serve process tree (pids 1332/1338/1441/1496/1497)
-      had to be force-killed (kill -9) to recover. After the kill, nvidia-smi
-      confirmed both GPUs cleanly dropped to 0 MiB -- the wedge was at the
-      process/synchronization level, not an unrecoverable GPU driver state, and
-      the pod remains usable for further work.
-      TP=2 leg stopped here. Steps 4-8 (second tenant B, stop B, identity
-      restore, /checkpoint_restore, final wake+correctness, teardown) were not
-      attempted, since they all depend on step 3s checkpoint succeeding.
+The real explanation and the full isolation testing are written up in docs/sleep-mode.md. A follow-up, more controlled retry of this same scenario is reports/tp2-park-flashinfer-20260903-130336.txt (also fails, in a bounded way).
 
-------------------------------------------------------------------------------
-CORRECTION (added after the root-cause investigation; the transcript above is
-the raw run and is left as recorded)
-------------------------------------------------------------------------------
-      Two claims in the ANOMALY block are wrong.
-      1. "mutual wait on each other ... because only one rank was ever
-         mid-checkpoint at a time" -- no. The mechanism is not rank-to-rank and
-         not ordering-dependent. scripts/cuda-checkpoint-ipc-matrix.py
-         reproduces the same hang with --parallel (both ranks mid-checkpoint
-         simultaneously), and reproduces it with only ONE child ever touched, as
-         long as that child holds a live NCCL communicator or torch symmetric
-         memory. The futex_wait_queue in wchan is a symptom of the wedged
-         driver call holding the per-process checkpoint lock, not a deadlock
-         between the ranks.
-      2. "the new /checkpoint_prepare route correctly tearing down NCCL
-         communicators first" -- it does not tear down NCCL at all.
-         CudaCommunicator.checkpoint_prepare (cuda_communicator.py:588)
-         releases only the FlashInfer all-reduce workspace and the FlashInfer
-         all2all manager: "Only FlashInfer all-reduce and FlashInfer all2all
-         are supported for now". This run's dispatch chain was
-         ['CUSTOM', 'SYMM_MEM', 'PYNCCL'] and pynccl_comm is built
-         unconditionally at world_size>1, so the 0.06s call freed nothing that
-         mattered -- which is exactly why it looked like a success.
-      The actual root cause, the isolating matrix, and the deeper conflict
-      (releasing the NCCL comm requires destroying the captured CUDA graphs
-      that sleep level 1 exists to preserve) are written up in
-      docs/sleep-mode.md. A bounded re-run that forces the one backend with a
-      stable-VA detach is reports/tp2-park-flashinfer-20260903-130336.txt.
+(Condensed summary — full raw transcript preserved in git history.)

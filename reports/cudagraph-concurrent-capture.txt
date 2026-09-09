@@ -1,79 +1,19 @@
-# Concurrent CUDA graph capture: raw probe output
-# 2026-09-03T13:58:33Z  ns=lionel-cold-start-cc  pod=vllm-coldstart  node=pokprod-b93r44s2
-# image: vllm/vllm-openai@sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635
-# scripts/cudagraph-concurrent-capture.py and scripts/cudagraph-capture-legality.py,
-# copied into the pod and run there. See docs/concurrent-cudagraph-capture.md.
+Can multiple CUDA graphs (pre-built, fixed-shape GPU execution plans) be captured at the same time, on different threads, instead of one at a time?
 
-=== python3 ccc.py --threads 2 4 8 --reps 5 ===
-torch 2.13.0+cu130  cuda 13.0  NVIDIA H100 80GB HBM3
-workload: 32 graphs x 200 layers x (512,1024) bf16, ~400 nodes/graph
+setup: synthetic workload on one H100 GPU — 32 graphs, standing in for the real capture work vLLM does at startup
+RESULT: yes, but the speedup is small and inconsistent, and it costs extra GPU memory per thread. Using one shared memory pool across threads doesn't work at all (crashes); each thread needs its own.
 
-serial                         94.1 ms  [93-129]  cpu/wall=1.00  per-graph= 2.94 ms  maxdiff=0  {'graphmem_MiB': 4.0}
-serial-globalmode              97.0 ms  [94-125]  cpu/wall=1.00  per-graph= 3.03 ms  maxdiff=0  {'graphmem_MiB': 4.0}
-threads-2-ownpool              85.7 ms  [82-91]  cpu/wall=1.78  per-graph= 2.68 ms  maxdiff=0  {'concurrency': 2.0, 'graphmem_MiB': 8.0}
-threads-4-ownpool              94.3 ms  [90-98]  cpu/wall=2.75  per-graph= 2.95 ms  maxdiff=0  {'concurrency': 3.91, 'graphmem_MiB': 16.0}
-threads-8-ownpool             155.7 ms  [151-159]  cpu/wall=2.89  per-graph= 4.87 ms  maxdiff=0  {'concurrency': 7.57, 'graphmem_MiB': 32.0}
-threads-2-sharedpool       FAILED: RuntimeError: beginAllocateToPool: already recording to mempool_id
-threads-4-sharedpool       FAILED: RuntimeError: beginAllocateToPool: already recording to mempool_id
-threads-8-sharedpool       FAILED: RuntimeError: beginAllocateToPool: already recording to mempool_id
+Timing (lower is better; "serial" = capturing them one at a time):
+- serial: 94.1 ms
+- 2 threads, each with its own memory pool: 85.7 ms (modest win)
+- 4 threads, own pools: 94.3 ms (no real win)
+- 8 threads, own pools: 155.7 ms (slower than doing it serially)
+- any attempt to share one memory pool across threads: fails outright with an error
+- with GPU memory allocation removed from the test entirely ("noalloc" variant, to isolate whether the allocator itself was the bottleneck): 2 threads did better (72.0 ms vs 84.7 ms serial), but 4 and 8 threads still leveled off around 86.5 ms — so allocator contention explains part of the slowdown at higher thread counts, but not all of it.
+- GPU memory used for the graphs scales directly with the number of separate memory pools (1 pool = 4 MiB, 2 pools = 8 MiB, 4 pools = 16 MiB, 8 pools = 32 MiB) — more concurrency means more memory spent, linearly.
 
-serial-noalloc                 84.7 ms  [78-107]  cpu/wall=1.00  per-graph= 2.65 ms  maxdiff=0  {'graphmem_MiB': 2.0}
-threads-2-noalloc              72.0 ms  [64-80]  cpu/wall=1.77  per-graph= 2.25 ms  maxdiff=0  {'concurrency': 2.01, 'graphmem_MiB': 0.0}
-threads-4-noalloc              86.5 ms  [75-136]  cpu/wall=2.36  per-graph= 2.70 ms  maxdiff=0  {'concurrency': 3.99, 'graphmem_MiB': 0.0}
-threads-8-noalloc              86.5 ms  [84-91]  cpu/wall=3.47  per-graph= 2.70 ms  maxdiff=0  {'concurrency': 7.84, 'graphmem_MiB': 0.0}
+Separately, a set of correctness checks tested what happens if another thread does something on the GPU *while* one thread is in the middle of capturing a graph. With the safer "thread_local" capture mode, most common operations (freeing memory, syncing that thread's own work, allocating new memory, running an unrelated calculation, starting a second capture in its own pool) are all safe and don't break the capture in progress. Only two things are unsafe: a global `torch.cuda.synchronize()` call, and trying to start a second capture into the *same* memory pool as the one already being captured. With the less-safe "global" capture mode, almost everything from another thread breaks the in-progress capture, except a couple of memory operations.
 
-threads-2-globalmode       FAILED: AcceleratorError: CUDA error: operation not permitted when stream is capturing
-Search for `cudaErrorStreamCaptureUnsupported' in https://docs.nvidia.c
+Key takeaway: capturing graphs concurrently is possible and safe if each thread gets its own memory pool and uses thread-local capture mode, but the payoff tops out at roughly 2 threads and turns negative beyond that — it is not a large, easy win. Full analysis and how this connects to vLLM's actual startup cost: docs/concurrent-cudagraph-capture.md.
 
-wrote /tmp/ccc5.json
-
-=== python3 ccc.py --pool-probe ===
-torch 2.13.0+cu130  cuda 13.0  NVIDIA H100 80GB HBM3
-workload: 32 graphs x 200 layers x (512,1024) bf16, ~400 nodes/graph
-
-graph-pool cost of N mempools (serial capture, memory only):
-  1 pool(s) for 32 graphs:      4.0 MiB reserved for graph memory   maxdiff=0
-  2 pool(s) for 32 graphs:      8.0 MiB reserved for graph memory   maxdiff=0
-  4 pool(s) for 32 graphs:     16.0 MiB reserved for graph memory   maxdiff=0
-  8 pool(s) for 32 graphs:     32.0 MiB reserved for graph memory   maxdiff=0
-
-=== python3 legal.py ===
-# Re-run 2026-09-03T14:27:51Z after a correctness fix to the probe: it used to run all eight
-# checks against ONE capture, and check #1 (a device sync) invalidates that
-# capture -- so checks 2-8 were being measured against a capture that was
-# already dead. Each check now gets its own fresh capture, and the third column
-# reports whether the capture survived the check. Every verdict below matches
-# the earlier shared-capture run, so the conclusions in the doc are unchanged;
-# what is new is that they are now sound, and that the survival column
-# separates "refused" from "fatal".
-torch 2.13.0+cu130  cuda 13.0  NVIDIA H100 80GB HBM3
-
---- another thread capturing with capture_error_mode='thread_local', one fresh capture per probe ---
-  operation, from a non-capturing thread               probe    capture survived
-  torch.cuda.synchronize()                             RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
-        AcceleratorError: CUDA error: operation not permitted when stream is capturing
-  torch.cuda.empty_cache()                             ok       yes
-  torch.cuda.current_stream().synchronize()            ok       yes
-  torch.zeros(1<<22, device=cuda)  # fresh cudaMalloc  ok       yes
-  eager matmul on default stream                       ok       yes
-  torch.cuda.mem_get_info()                            ok       yes
-  second capture, own pool                             ok       yes
-  second capture, same pool                            RAISES   yes
-        RuntimeError: beginAllocateToPool: already recording to mempool_id
-
---- another thread capturing with capture_error_mode='global', one fresh capture per probe ---
-  operation, from a non-capturing thread               probe    capture survived
-  torch.cuda.synchronize()                             RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
-        AcceleratorError: CUDA error: operation not permitted when stream is capturing
-  torch.cuda.empty_cache()                             RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
-        AcceleratorError: CUDA error: operation not permitted when stream is capturing
-  torch.cuda.current_stream().synchronize()            RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
-        AcceleratorError: CUDA error: operation not permitted when stream is capturing
-  torch.zeros(1<<22, device=cuda)  # fresh cudaMalloc  ok       yes
-  eager matmul on default stream                       RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
-        AcceleratorError: CUDA error: operation not permitted when stream is capturing
-  torch.cuda.mem_get_info()                            ok       yes
-  second capture, own pool                             RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
-        AcceleratorError: CUDA error: operation not permitted when stream is capturing
-  second capture, same pool                            RAISES   no  (AcceleratorError: CUDA error: operation failed due to a previous error during capture)
-        AcceleratorError: CUDA error: operation not permitted when stream is capturing
+(Condensed summary — full raw probe output preserved in git history.)

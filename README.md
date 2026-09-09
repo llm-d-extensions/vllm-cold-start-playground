@@ -29,6 +29,27 @@ The end of the window is `/health` returning 200. Three more edges are recorded
 around it (`port_open`, `models_200`, `first_token`) because they routinely
 differ by seconds and because which one you pick changes what "ready" means.
 
+## Terminology
+
+Two words recur throughout this README and the linked reports:
+
+* **Ladder** — a sequence of runs where each step adds exactly one change on
+  top of the previous step, everything else held fixed. Because consecutive
+  steps differ in only one variable, the *change* in time-to-ready between two
+  adjacent steps can be attributed to that one variable, not to a mix of
+  several. The main ladder below runs baseline → bytecode cache → fork →
+  faster loader → loader tuning, five steps, one change per step. Other
+  ladders in this repo re-run the same steps under a different starting
+  condition (a cold model-registry cache, TP=2 instead of TP=1) to see which
+  steps still hold.
+* **Lever** — any one change that can be pulled to move time-to-ready: an env
+  var, a CLI flag, a patch, a different loader. "Does this lever survive at
+  TP=2?" means "does this specific change still save time when run with two
+  GPUs instead of one?" Not every lever is worth pulling — some only save
+  startup time by spending something else (steady-state inference speed, host
+  RAM), which is what [the solution space](#the-solution-space-and-what-each-one-costs)
+  sorts by.
+
 ## Results so far: Qwen3-32B on one H100
 
 `Qwen/Qwen3-32B` (61.02 GiB, 17 shards), TP=1 on one H100 80GB, weights on GPFS,
@@ -43,6 +64,14 @@ registry cache already populated, so these are *second*-boot numbers; the
 first-boot ladder is
 [below](#the-first-boot-is-not-the-second-the-model-registry-subprocess).
 
+**Current best known stack:** `PYTHONPYCACHEPREFIX` + `fork` +
+`--load-format runai_streamer` (tuned) — no patch, no extra package, ~39s.
+Swap in `--load-format instanttensor` (`pip install vllm[instanttensor]`) for
+~37s if you can add the package to the image. The ladder below is where each
+of those levers was found and how their savings were isolated; step 5's loader
+is the historical record of *how this project got there*, not the current
+recommendation — see the note right after the table.
+
 | # | change added | median ready | the 3 runs | Δ | phase that moved |
 |---|---|---|---|---|---|
 | 1 | **baseline** — vLLM defaults: `spawn`, no writable `__pycache__`, `--load-format auto` | [**90.65s**](reports/32b-step1-baseline-spawn.txt) | 85.08 / 90.65 / 91.22 | — | imports 37.6s, weight load 32.2s |
@@ -54,6 +83,27 @@ first-boot ladder is
 **90.65s → 43.30s, −47.35s (−52%).** Only step 5 needs patched code; steps 2-4 are
 configuration. Compile time is 0.21-0.25s in every arm, so nothing here is a
 recompile artifact.
+
+**Step 5 is no longer the recommended loader.** Two follow-up measurements,
+run after this ladder, found faster options that need no patch:
+
+| loader | weight load | boot ready | how it was measured |
+|---|---|---|---|
+| step 5 above: fastsafetensors + `cs_fst` patch | 13.7s | 43.30s | this ladder, interleaved median-of-3 |
+| `--load-format runai_streamer`, tuned (distributed flag, 8 workers) | **9.26s** | 39.09s | isolated comparison, single run — [report](reports/loader-comparison-32b.txt) |
+| `--load-format instanttensor` (`pip install vllm[instanttensor]`) | **~8s** | 36.9s | separate launcher harness, single run — [report](reports/launcher-cold-start-tp1-tp2.md) |
+
+`runai_streamer` ships with vLLM and needs no patch, so it replaces `cs_fst`
+outright — **that is the current recommendation for this checkpoint layout.**
+`instanttensor` is faster still but is an optional package outside the base
+image, and its number comes from a different harness (an isolated loader test
+and a launcher, not this ladder's interleaved matrix), so treat 36.9s as a
+separate measurement rather than a directly comparable row. Neither has been
+re-run inside the ladder's own interleaved matrix yet, which is why the 43.30s
+row above is left as the historical record rather than rewritten; see
+[the solution space](#the-solution-space-and-what-each-one-costs) for the full
+cost comparison, including why `cs_fst` is kept as superseded rather than
+deleted.
 
 The next phase down, `cudagraph capture` at 11.4s, is deliberately **not** a step:
 every configuration lever that shrinks it degrades steady-state inference. See
@@ -96,6 +146,9 @@ What the phase breakdown says about each step:
   that most deployments never set it.
 * **Then fastsafetensors asks for hardware that is not installed** — the `nogds`
   row below.
+* **fastsafetensors+`cs_fst` was never the fastest option, just the first one
+  tried** — see the loader table above and
+  [the solution space](#the-solution-space-and-what-each-one-costs).
 * **What is left is CUDA graph capture — 11.4s that this harness can measure and
   should not "fix".** vLLM captures one graph per batch size per mode: 51 sizes ×
   2 modes = 102 graphs, **11.4s**, 26% of the step-5 total, in a phase this
@@ -468,8 +521,9 @@ attractive are doing exactly that.
 
 | what it spends | options | verdict |
 |---|---|---|
-| **nothing** — a stock env var or flag | `PYTHONPYCACHEPREFIX`, `fork`, `--load-format fastsafetensors` | **adopted**: −43.01s of the −47.35s |
-| a monkey-patch, with a real upstream fix behind it | `cs_fst` (`nogds`, `max_threads`, `bbuf_size_kb`) | **adopted**, opt-in: −4.34s |
+| **nothing** — a stock env var or flag | `PYTHONPYCACHEPREFIX`, `fork`, `--load-format runai_streamer` (tuned) | **adopted, current recommendation**: imports+fork −27.28s, loader down to 9.26s weight load, no patch |
+| an optional package (`pip install`) | `--load-format instanttensor` | **fastest measured** — weight load ~8s, at the cost of a dependency outside the base image |
+| a monkey-patch, with a real upstream fix behind it | `cs_fst` (`nogds`, `max_threads`, `bbuf_size_kb`) | **superseded** by the stock loader above — kept for the historical record and the upstream bug it documents |
 | **steady-state inference** | shorter `cudagraph_capture_sizes`, `FULL_DECODE_ONLY` | **rejected** — see below |
 | engineering inside vLLM | hoisting the capture prologue (**−4.0s**), on-demand capture, a cheaper PIECEWISE forward, concurrent capture, the six warmup findings | **the real answer**, and not ours to ship |
 | host RAM and a resident process | sleep mode, `+ cuda-checkpoint`, `+ --device-map` | **works today** — but it is warm standby, not cold start |
@@ -482,8 +536,9 @@ attractive are doing exactly that.
 |---|---|---|
 | `PYTHONPYCACHEPREFIX=/cache/pycache` | **−22.31s** | Nothing at runtime. The real fix is upstream: `compileall` at image build time, so no operator needs to know the knob exists. |
 | `VLLM_WORKER_MULTIPROC_METHOD=fork` | **−4.97s** | Forking a multi-threaded, torch-loaded parent. vLLM silently reverts to `spawn` if CUDA is already initialised, and Python 3.14 moves the Linux default to `forkserver`. This is borrowed time, not a durable win — and at TP=2 the time is already gone: CUDA *is* initialised before the engine launches, so the revert fires on every run and the lever is worth 0s ([measured](#what-survives-at-tp2)). |
-| `--load-format fastsafetensors` | **−15.73s** | Nothing. Storage was never the bottleneck — read concurrency was, and the flag is obscure enough that most deployments never set it. |
-| `cs_fst`: `nogds=True`, `max_threads=8`, `bbuf_size_kb=32768` | **−4.34s** | A monkey-patch. At TP=1 vLLM always asks for GPUDirect Storage without checking whether it exists, and the two tuning knobs are not plumbed through vLLM at all. |
+| `--load-format runai_streamer`, tuned (distributed flag, 8 workers) — **current recommendation** | **weight load 32.2s → 9.26s** | Nothing — stock flag, ships with vLLM. The "distributed" flag is really just the on/off switch for copying straight to the GPU at TP=1; its name is misleading. Beats `fastsafetensors` + `cs_fst` (below) by 4.3s on the weight-load phase, with no patch. [Measured](reports/loader-comparison-32b.txt) on the same model/hardware, page-cache warm, TP=1 only — not yet re-run inside this ladder's own interleaved matrix. |
+| `--load-format instanttensor` | weight load ~30s → ~8s in a separate launcher experiment | An optional package (`pip install vllm[instanttensor]`), not in the base vLLM image. Fastest loader tested so far, at both TP=1 and TP=2. [Measured](reports/launcher-cold-start-tp1-tp2.md) in a different harness (a launcher fronting vLLM), so treat the absolute numbers as a separate measurement, not a direct row in the ladder above. |
+| `--load-format fastsafetensors`, optionally + `cs_fst` (`nogds=True`, `max_threads=8`, `bbuf_size_kb=32768`) | **−15.73s**, patch adds **−4.34s** more | The originally published choice, and the ladder's own steps 4/5. Storage was never the bottleneck — read concurrency was — so the flag alone is worth adopting on its own merits. The `cs_fst` patch on top is **superseded** by `runai_streamer` above (which beats the patched result by 4.3s with no patch) but is kept here and in [what is patched](#what-is-patched-and-what-should-be-upstreamed) for the upstream bug it documents: at TP=1 vLLM always asks for GPUDirect Storage without checking whether it exists. |
 | `forkserver` (probe only) | **parity** | Nothing, and it buys nothing at TP=1 — one child means nothing to amortise. At TP=2 it buys nothing either, for a different and more interesting reason: the same "CUDA is initialized" veto that kills `fork` makes the probe decline, so the preload runs and serves **zero** children ([measured](#what-survives-at-tp2)). Whether one preload can amortise across N workers is still untested — removing the veto is the prerequisite. |
 
 ### Rejected: buying startup with steady-state inference
@@ -561,7 +616,7 @@ One is a monkey-patch, and it is the one with a real upstream fix behind it.
 | `VLLM_WORKER_MULTIPROC_METHOD=fork` | env var, already a supported value | `fork` works but is on borrowed time — it forks a multi-threaded, torch-loaded parent, vLLM silently reverts to `spawn` if CUDA is already initialised, and Python 3.14 moves the Linux default to `forkserver`. vLLM already contains forkserver support (`api_server.py:111-117`) but **rejects the value**: `envs.py:930` declares the choices as `["spawn", "fork"]` (and the annotation at `envs.py:67` agrees), so `get_mp_context()` (`utils/system_utils.py:168`) raises `ValueError`. Making it reachable is those two lines; making it *pay* also needs `forkserver.ensure_running()` moved to the top of `cli/main.py:main()`, because where it sits now only ~1.7s of its ~15s preload overlaps anything. |
 | `--load-format fastsafetensors` | stock CLI flag | Nothing to patch. Worth documenting that the win is this large, since the flag is easy to miss. |
 | **nothing** — CUDA graph capture is *not* configured away here | measured only, see [above](#cuda-graph-capture-114s-that-configuration-cannot-honestly-remove) | Capturing 51 sizes × 2 modes costs **11.4s** at TP=1 on a 32B model, 26% of time-to-ready, and it is unavoidable without degrading inference. The cost is concentrated in the PIECEWISE forward — 124ms per size against 16ms for FULL at identical graph counts, while torch-level capture is 1.66s of the 11.4s. Four things would move it without an operator trade-off: make the piecewise capture forward cheaper (it is 7.7x FULL for no obvious reason), overlap capture across sizes instead of running 102 forwards serially, capture on demand so only the shapes a workload reaches are built ([docs/on-demand-cudagraph.md](docs/on-demand-cudagraph.md) — 11.4s off readiness, 3.3s of it deleted outright, but it needs a vLLM change and fixes a latent silent-corruption bug first), or persist graphs across boots so a warm node captures nothing at all. The last is what [Foundry](docs/foundry.md) does — and note that snapshotting the graph pool with `cuda-checkpoint` is *not* a shortcut to it: CUDA exposes no graph serialization API at all, and captured kernels embed device addresses reaching into the weights and KV cache, so nothing smaller than the full 68.8 GiB address space is restorable ([why](docs/foundry.md#why-cuda-checkpoint-is-not-a-next-boot-shortcut)). Within a *live* process it is a different story: vLLM's VMM-based sleep mode frees 69.70 GiB and `cuda-checkpoint` then takes the residual to **0 MiB**, all the way back in **5.09s** with the graphs intact ([docs/sleep-mode.md](docs/sleep-mode.md)) — but that keeps the process and ~64 GiB of host RAM, so it is warm standby, not cold start. Serializing that snapshot for the *next* boot is not a `cuda-checkpoint` capability and cannot be made into one: its whole interface is pid-keyed with no output path, and what `--action checkpoint` produces is a GPU-free process (0 `/dev/nvidia*` fds, 0 MiB held) for a dumper to write out, never a file ([priced](docs/sleep-mode.md#can-the-snapshot-be-serialized-and-reused-by-a-fresh-vllm)). What the live snapshot *can* do is move: `--action restore --device-map` brings a parked engine back on a **different GPU** of the same node in **2.67s**, and the 61.68 GiB of new allocations at `/wake_up` follow the remap onto the new card ([measured](docs/sleep-mode.md#restoring-onto-a-different-gpu)) — so a pod can defragment its own devices without re-reading weights or re-capturing graphs, at the cost of having to see all of them. Shortening `cudagraph_capture_sizes` is *not* the fix — it moves the cost to steady state. |
-| `nogds=True`, `max_threads=8`, `bbuf_size_kb=32768` | **monkey-patch** — [`coldstart/cs_fst.py`](coldstart/cs_fst.py) wraps `fastsafetensors.parallel_loader.ParallelLoader.__init__`; opt-in via `CS_FST=1` | `weight_utils.py:1057` computes `nogds = pg.size() > 1`, and the comment above it shows why: at TP>1 `cuFileDriverOpen()` would create CUDA contexts on every visible GPU. Availability of GDS is never checked, so at TP=1 vLLM *always* asks for it. There *is* a fallback (`weight_utils.py:1083`), but it needs a `RuntimeError` with `"gds"` in the message — and fastsafetensors degrades internally rather than raising, so the fallback never fires: the `"GDS not enabled"` warning appears in none of our runs. The failed probe is then billed silently to every fresh `EngineCore` — 1.69s of one-time setup plus 0.91s of steady-state throughput. It should key on whether `libcufile` and `nvidia_fs` exist, not on world size. Because it keys on world size, this half of the patch is worth exactly **−0.14s at TP=2** — vLLM already passes `nogds=True` there, so the bug it fixes only exists at TP=1 ([measured](#what-survives-at-tp2)). `max_threads` and `bbuf_size_kb` are not reachable from vLLM at all: not plumbed through, and absent from fastsafetensors' own `LoaderConfig`; they are the only part of the patch that still pays at TP>1, and only inside the weight phase (−0.63s). |
+| `nogds=True`, `max_threads=8`, `bbuf_size_kb=32768` | **monkey-patch** — [`coldstart/cs_fst.py`](coldstart/cs_fst.py) wraps `fastsafetensors.parallel_loader.ParallelLoader.__init__`; opt-in via `CS_FST=1` | `weight_utils.py:1057` computes `nogds = pg.size() > 1`, and the comment above it shows why: at TP>1 `cuFileDriverOpen()` would create CUDA contexts on every visible GPU. Availability of GDS is never checked, so at TP=1 vLLM *always* asks for it. There *is* a fallback (`weight_utils.py:1083`), but it needs a `RuntimeError` with `"gds"` in the message — and fastsafetensors degrades internally rather than raising, so the fallback never fires: the `"GDS not enabled"` warning appears in none of our runs. The failed probe is then billed silently to every fresh `EngineCore` — 1.69s of one-time setup plus 0.91s of steady-state throughput. It should key on whether `libcufile` and `nvidia_fs` exist, not on world size. Because it keys on world size, this half of the patch is worth exactly **−0.14s at TP=2** — vLLM already passes `nogds=True` there, so the bug it fixes only exists at TP=1 ([measured](#what-survives-at-tp2)). `max_threads` and `bbuf_size_kb` are not reachable from vLLM at all: not plumbed through, and absent from fastsafetensors' own `LoaderConfig`; they are the only part of the patch that still pays at TP>1, and only inside the weight phase (−0.63s). **This whole patch is superseded**: `--load-format runai_streamer` (stock, tuned) beats it by 4.3s on the weight phase with no patch, and `instanttensor` (optional package) is faster still — see [reports/loader-comparison-32b.txt](reports/loader-comparison-32b.txt) and [reports/launcher-cold-start-tp1-tp2.md](reports/launcher-cold-start-tp1-tp2.md). |
 
 Two hazards deliberately *not* fixed here, both prerequisites for the forkserver
 work rather than wins of their own:
@@ -763,6 +818,18 @@ instrumentation, not a rounding artifact.
   [Foundry](https://github.com/foundry-org/foundry), which persists CUDA graphs to
   disk: what it eliminates in our phase model, its operating constraints, and how
   to evaluate it here.
+* **[reports/loader-comparison-32b.txt](reports/loader-comparison-32b.txt)** —
+  is `fastsafetensors` + `cs_fst` actually the best loader? No: a stock flag,
+  `--load-format runai_streamer` (tuned), beats it by 4.3s on the weight-load
+  phase with no patch. Covers all 14 vLLM loader options, which ones even apply
+  to this checkpoint layout, and how far each one sits from the physical
+  disk-read/GPU-copy floor.
+* **[reports/launcher-cold-start-tp1-tp2.md](reports/launcher-cold-start-tp1-tp2.md)** —
+  cold start measured from a permanent launcher process instead of a bare
+  `vllm serve`: what the launcher's warm-import + fork design is worth, why fork
+  stops helping at TP=2, and a head-to-head against a fully tuned standalone
+  `vllm serve`. Also where `--load-format instanttensor` — the fastest loader
+  found in this repo so far — is measured.
 
 ## Layout
 

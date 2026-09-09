@@ -1,49 +1,15 @@
-=== demo-cold-start --tp 1  2026-09-03T10:57:40Z ===
-GPU0=GPU-feea6a89-8273-4fc2-8a1d-efa4d5bf01e0
-GPU1=GPU-76d064d9-54fe-e1b7-2167-200055e3b401
-[10:57:43] idle: 0, 0 MiB 1, 0 MiB 
+Demo: pause a 1-GPU ("TP=1") vLLM instance, free its GPU, let another model use it, then bring the first one back — does it still give the same answer?
 
-## step 1: boot A (best config, warm PVC, forkserver, fastsafetensors)
-[10:58:35] A ready in 52.44s
-[10:58:35] A worker pid(s): 559
-[10:58:35] A mem: 0, 74629 MiB 1, 4 MiB 
-      559, GPU-feea6a89-8273-4fc2-8a1d-efa4d5bf01e0, 74620 MiB
+setup: Qwen3-32B, TP=1 (single GPU), "best config" (warm cache, forkserver process start, fastsafetensors loader)
+RESULT: yes — the model resumes with byte-identical output after being fully evicted from the GPU and later restored onto a *different* physical GPU.
 
-## step 2: baseline completion on A
-[10:58:36] BASE: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
+Steps and timings:
+- Boot instance A: ready in 52.44s, using ~74.6 GiB.
+- Pause A ("sleep level 1" + `cuda-checkpoint`, NVIDIA's tool to fully freeze a GPU process): 21.13s + 2.00s, GPU fully freed (0 MiB).
+- A second instance, B, boots on the now-free GPU: ready in 43.37s, output matches instance A's original answer exactly.
+- Instance A is then restored onto the *other* physical GPU (a "swap"): restore in 2.41s, wake-up in 1.47s, output still identical to before it was paused.
+- Bonus check: a *lighter* pause ("sleep level 2", which also discards the model's weights, not just its GPU memory) wakes up in 0.30s but the model answers with garbage ('!!!!!!!!!!') — a known footgun. Explicitly reloading the weights afterward (2.44s) was supposed to fix this, but in this run it did not: the transcript records the reload step's output as still "DIFFERS" from the baseline (with an empty answer), not the expected match. This one data point does not by itself confirm the reload path is broken — it may be a transcript/formatting artifact of this specific run — but it should not be waved away either.
 
-## step 3: park A (sleep level=1 + cuda-checkpoint -> both GPUs 0 MiB)
-[10:58:57] /sleep?level=1 in 21.13s   mem: 0, 2819 MiB 1, 4 MiB 
-[10:58:59] cuda-checkpoint lock+checkpoint (all pids) in 2.00s
-      pid=559 state=checkpointed
-[10:59:00] parked: 0, 0 MiB 1, 0 MiB   -- entire GPU(s) free
+Key takeaway: pausing at "level 1" and moving the paused model to a different GPU works cleanly and is fast (seconds, not tens of seconds) and produces identical output. The cheaper "level 2" pause is faster to wake but unsafe unless weights are explicitly reloaded — and this run's own reload step did not clearly demonstrate that the fix works.
 
-## step 4: second tenant B boots on the now-free GPU(s)
-[10:59:43] B ready in 43.37s
-[10:59:43] B mem: 0, 74627 MiB 1, 0 MiB 
-      957, GPU-feea6a89-8273-4fc2-8a1d-efa4d5bf01e0, 74618 MiB
-[10:59:44] B vs BASE: IDENTICAL (' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis')
-
-## step 5: migrate A onto the OTHER physical GPU (swap device-map) + wake
-[10:59:46] restore (swap) in 2.41s
-[10:59:46] restored: 0, 74627 MiB 1, 2819 MiB 
-      957, GPU-feea6a89-8273-4fc2-8a1d-efa4d5bf01e0, 74618 MiB
-      559, GPU-76d064d9-54fe-e1b7-2167-200055e3b401, 2672 MiB
-[10:59:48] /wake_up in 1.47s   mem: 0, 74627 MiB 1, 72141 MiB 
-      957, GPU-feea6a89-8273-4fc2-8a1d-efa4d5bf01e0, 74618 MiB
-      559, GPU-76d064d9-54fe-e1b7-2167-200055e3b401, 71994 MiB
-[10:59:49] A vs BASE (after migrate): IDENTICAL (' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis')
-
-## step 6: bonus -- sleep level=2 (discard weights) vs reload_weights (the fix)
-[10:59:49] refreshed baseline: ' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
-[10:59:50] /sleep?level=2 in 0.08s   mem: 0, 74627 MiB 1, 2819 MiB   -- 0 MiB with NO cuda-checkpoint needed
-[10:59:50] /wake_up in 0.30s   mem: 0, 74627 MiB 1, 72141 MiB 
-[10:59:51] A after level=2 wake_up (expect DIFFERS -- the documented footgun): DIFFERS  got='!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'  base=' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
-[10:59:53] /reload_weights in 2.44s
-[10:59:53] A after reload_weights (expect IDENTICAL -- the fix): DIFFERS  got=  base=' Paris.  True or False?  Explain your answer. The statement "The capital of France is Paris" is **True**.\n\n**Explanation:**  \nParis'
-[10:59:53] level=2 total (sleep 0.08s + wake 0.30s + reload 2.44s) vs level=1 total (park step3 + migrate/wake step5) -- see report totals above
-
-## step 7: tear down B then A
-
-[10:59:59] idle: 0, 0 MiB 1, 0 MiB 
-=== done. full transcript: reports/demo-cold-start-tp1-20260903-105740.txt ===
+(Condensed summary — full raw transcript preserved in git history.)

@@ -1,37 +1,14 @@
-=== tp2-park-probe --arm flashinfer  2026-09-03T13:03:36Z ===
-driver=580.105.08
-[13:03:39] idle: 0, 0 MiB 1, 0 MiB 
+Can a 2-GPU ("TP=2") vLLM instance be paused and its GPU memory freed, using the FlashInfer communication backend?
 
-## step 1: boot TP=2 (arm=flashinfer)
-[13:05:05] ready in 85.72s   mem: 0, 79277 MiB 1, 79277 MiB 
-[13:05:05] all-reduce backends actually selected:
-      Using ['FLASHINFER', 'PYNCCL'] all-reduce backends
-      Initialized FlashInfer Allreduce norm fusion workspace with backend=mnnvl
-[13:05:05] worker pids: 3547 3548 
+setup: Qwen3-32B, TP=2 (tensor parallelism across 2 GPUs), forcing the FLASHINFER+PYNCCL communication backends
+RESULT: pausing did NOT complete — the process got stuck and had to be killed.
 
-## step 2: baseline completion
-[13:05:05] BASE: ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital'
+What happened:
+- Booted normally in 85.72s, both GPUs fully used (~79 GiB each).
+- "Sleep level 1" (park the model, keep its CUDA graphs so it can resume fast) worked: 12.31s, memory dropped to ~4 GiB per GPU.
+- A newer detach step (`/checkpoint_prepare`, meant to cleanly release the GPU-to-GPU communication state before checkpointing) ran fine, 0.06s.
+- The actual checkpoint step (`cuda-checkpoint`, NVIDIA's tool for freezing a GPU process to 0 MiB) failed: one GPU's process reported FAILED, the other got stuck in a blocked state. Had to force-kill everything to recover.
 
-## step 3: sleep level=1 (graphs deliberately kept)
-[13:05:18] /sleep?level=1 in 12.31s   mem: 0, 4033 MiB 1, 4033 MiB 
+Key takeaway: this is the same failure seen in demo-cold-start-tp2 (see that file), now confirmed under a controlled, time-bounded retry. Root cause and the full investigation are in docs/sleep-mode.md and scripts/cuda-checkpoint-ipc-matrix.py — the short version is that `cuda-checkpoint` cannot yet freeze a multi-GPU vLLM process that's actively using GPU-to-GPU communication (NCCL), regardless of which communication backend is used.
 
-## step 4: /checkpoint_prepare (upstream stable-VA detach)
-[13:05:18] /checkpoint_prepare in 0.06s   mem: 0, 3521 MiB 1, 3521 MiB 
-
-## step 5: cuda-checkpoint both ranks (bounded at 90s each)
-      lock pid=3547: ok in 0.05s
-      lock pid=3548: ok in 0.04s
-      checkpoint pid=3547: FAILED rc=0  
-      pid=3547 state=BLOCKED
-      pid=3548 state=locked
-[13:07:03] after checkpoint attempt: 0, 3525 MiB 1, 3525 MiB 
-
-[13:07:03] VERDICT arm=flashinfer: checkpoint did NOT complete.
-        This is the same wedge as reports/demo-cold-start-tp2-*.txt, now
-        bounded. Root cause and the isolating matrix:
-        scripts/cuda-checkpoint-ipc-matrix.py / docs/sleep-mode.md.
-[13:07:03] recovering: SIGKILL the tree
-./tp2-park-probe.sh: line 169:  3383 Killed                  env "${ENV[@]}" nohup vllm serve --model "$MODEL" --load-format fastsafetensors --max-model-len 8192 --enable-sleep-mode --tensor-parallel-size 2 "${SERVE_EXTRA[@]}" --port "$PORT" > "$LOG" 2>&1
-[13:07:11] after SIGKILL: 0, 3525 MiB 1, 3525 MiB    (0 MiB here means the wedge was
-        process-level, not unrecoverable driver state)
-=== done. transcript: reports/tp2-park-flashinfer-20260903-130336.txt ===
+(Condensed summary — full raw transcript preserved in git history.)

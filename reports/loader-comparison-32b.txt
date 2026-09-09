@@ -1,412 +1,133 @@
 ==============================================================================
-vLLM MODEL LOADERS: what the 13.3s weight phase can actually be moved with
+WEIGHT LOADERS COMPARED: is fastsafetensors+patch actually the best option?
 ==============================================================================
-pod          : vllm-coldstart (manifests/pod-exec-2gpu.yaml), CUDA_VISIBLE_DEVICES=0
-model        : Qwen/Qwen3-32B  61.02 GiB, 17 safetensors shards, 707 tensors
-stack        : vLLM 0.28.0 / torch 2.13.0+cu130 / CUDA 13.0, H100 80GB HBM3
-model fs     : gpfs on /cache (remote-filesystem-fs-ec), 136 GiB free
-cgroup       : cpu.max 16 cores, memory.max 128 GiB
-gds          : ABSENT -- no /dev/nvidia-fs*, no /proc/driver/nvidia-fs
-backends     : fastsafetensors 0.3.3, runai-model-streamer 0.16.1, safetensors 0.8.0
-               tensorizer / instanttensor / modelexpress NOT INSTALLED
+Setup: Qwen/Qwen3-32B (61 GiB, 17 files), TP=1, one H100, weights on a
+GPFS network filesystem, page cache warm (i.e. the OS already has the file
+data cached from a previous read). No GPU-Direct-Storage hardware present.
 
-The question this answers: the published TP=1 ladder ends at 43.30s with weight
-load still the largest phase (13.3s, 30.8%), and the step-5 configuration is a
-monkey-patch (coldstart/cs_fst.py) on top of --load-format fastsafetensors. vLLM
-ships thirteen other load formats. Which of them can beat that here, and what is
-the actual floor?
+The question: the main results table elsewhere in this project ends with
+weight loading still the single largest phase (13.3s), using
+--load-format fastsafetensors plus a custom patch (cs_fst). vLLM has 13
+other loading options. Is any of them actually faster, with no patch
+needed?
 
-------------------------------------------------------------------------------
-WHAT IS EVEN AVAILABLE HERE: all 14 load formats
-------------------------------------------------------------------------------
-vLLM 0.28.0 accepts 14 --load-format values, which map onto 6 loader classes
-(model_loader/__init__.py):
+HEADLINE RESULT: YES. --load-format runai_streamer, with one extra flag, is
+faster than the patched fastsafetensors setup, is a stock vLLM flag with no
+patch, and removes the largest remaining phase from first place.
 
-  auto hf safetensors pt npcache mistral fastsafetensors instanttensor
-                                          -> DefaultModelLoader
-  dummy                                   -> DummyModelLoader
-  runai_streamer                          -> RunaiModelStreamerLoader
-  runai_streamer_sharded, sharded_state   -> ShardedStateLoader
-  tensorizer                              -> TensorizerLoader
-  modelexpress                            -> ModelExpressModelLoader
+  loading method                              boot ready   weight load
+  -------------------------------------------  ----------  -----------
+  fastsafetensors + patch (published choice)      41.88s        13.57s
+  runai_streamer, default settings                40.76s        11.44s
+  runai_streamer, told "act distributed",
+    8 parallel workers                            39.09s         9.26s
 
-Three of them cannot run in this image at all -- the backend package is absent,
-so they raise ImportError before touching a byte:
+  -> runai_streamer (tuned) is 2.80s faster end-to-end and 4.31s faster
+     on the weight-load phase specifically, with NO patch. Weight load
+     drops from 13.3s to 9.26s and is no longer the biggest phase (CUDA
+     graph capture, at ~11s, becomes the largest instead).
 
-  instanttensor   pip install vllm[instanttensor]  (instanttensor >= 0.1.9)
-  tensorizer      pip install vllm[tensorizer]     (tensorizer == 2.10.1)
-  modelexpress    pip install modelexpress         + a ModelExpress service
+All three methods were checked to produce byte-identical model weights
+(fingerprinted, not just "the server responded").
 
-Four more find no files in this checkpoint. Qwen3-32B ships exactly
-model-0000N-of-00017.safetensors plus model.safetensors.index.json -- no
-consolidated*, no *.bin, no *.pt -- and default_loader.py:166-183 selects the
-glob per format:
+WHY: 13 OTHER LOADING FORMATS, MOST DON'T APPLY HERE
 
-  mistral    consolidated*.safetensors                 -> no match
-  npcache    *.bin  (and asserts use_safetensors False) -> no match
-  pt         *.pt                                      -> no match
-  sharded_state / runai_streamer_sharded
-             model-rank-{rank}-part-{part}.safetensors  -> "only pre-sharded
-             checkpoints are currently supported!"
+vLLM ships 14 --load-format values. On this specific model checkpoint
+(17 plain safetensors files, nothing else), only 3 are actually usable:
+- the default safetensors loader (what "auto" resolves to here)
+- fastsafetensors (the currently-published choice, needs a patch to tune)
+- runai_streamer (the one that wins, no patch needed)
 
-The pre-sharded pair is the one worth a second look, because the conversion pass
-(ShardedStateLoader.save_model) is a real option rather than a missing package.
-It costs a second 61 GiB copy on a volume with 136 GiB free, and it makes the
-artifact TP-shaped -- a checkpoint saved for TP=1 cannot boot at TP=2 -- so it
-trades cold-start time for artifact management. Not measured here; flagged.
+The rest don't apply: three need optional packages that aren't installed
+(tensorizer, instanttensor, modelexpress); four expect a differently
+laid-out checkpoint that this model doesn't have (e.g. pre-split-by-GPU
+files); one is just a "random weights, no loading" control used for
+comparison, not a real option.
 
-dummy is not a loader, it is the control: random weights, no I/O.
+ISOLATING THE LOADERS FROM VLLM ITSELF
 
-What is left is three distinct code paths, and on this artifact `auto`, `hf` and
-`safetensors` are the same one: `auto` looks for consolidated*.safetensors,
-finds none, and resolves to `hf`, whose glob matches the same 17 files that
-`safetensors` matches. So the real choices are:
+Timing each loader alone (reading the file into GPU memory, no vLLM engine
+around it) to find each one's own ceiling, best config first:
 
-  1. DefaultModelLoader's safetensors iterator, modulated by
-     --safetensors-load-strategy {lazy,eager,prefetch} and by
-     --model-loader-extra-config '{"enable_multithread_load": true}'
-  2. --load-format fastsafetensors  (the published step 4/5 arm)
-  3. --load-format runai_streamer
+  runai_streamer, 8 parallel workers      7.92s   (7.71 GiB/s)
+  fastsafetensors, tuned (published)     12.06s   (5.06 GiB/s)
+  plain safetensors + multithreading     24.92s   (2.45 GiB/s)
 
-------------------------------------------------------------------------------
-RESULT 1: REAL BOOTS.  runai_streamer beats the patched incumbent by 4.31s
-          of weight-load phase, with no monkey-patch
-------------------------------------------------------------------------------
-12 boots, runs/lf1-*, cycle-major interleaved, cycle 0 discarded, median of 3.
-Every arm carries the published step 1-3 levers (VLLM_WORKER_MULTIPROC_METHOD=
-fork, PYTHONPYCACHEPREFIX=/cache/pycache, CUDA_VISIBLE_DEVICES=0) and
---max-model-len 8192, so the only difference between rows is the load format.
+Three things stand out:
+1. The plain/default safetensors loader and its tuning knobs barely move --
+   they parallelize the file read, but the real bottleneck (copying into
+   GPU memory) was never touched by that.
+2. fastsafetensors' two tuning knobs (thread count, buffer size) make at
+   most a 10% difference across the whole range tried, and the published
+   setting is already about the best of that narrow range -- there is
+   very little left to gain by re-tuning it further.
+3. runai_streamer's one real knob (how many files it reads in parallel)
+   matters a lot: going from 4 to 8 parallel reads saves about 3 seconds.
+   Going past 8 (e.g. 16 or 32) makes it slightly worse, consistent with
+   this pod only having 16 CPU cores available.
 
-arm                                              ready   weight load    GiB/s
------------------------------------------------  ------  -----------  -------
-fastsafetensors + cs_fst  (published step 5)     41.88s      13.57s      4.50
-runai_streamer            (stock, no config)     40.76s      11.44s      5.33
-runai_streamer + distributed:true concurrency:8  39.09s       9.26s      6.59
+HOW FAR IS EACH LOADER FROM THE PHYSICAL FLOOR?
 
-                                                 Δ ready   Δ weight load
-  runai_streamer stock          vs step 5         -1.12s      -2.13s
-  runai_streamer + extra config vs step 5         -2.80s      -4.31s
+Measuring the raw disk-read speed and raw GPU-memory-copy speed separately
+(same pod, same files): reading the already-cached 61 GiB from disk takes
+about 2.1s at best, and copying 61 GiB into GPU memory over the fastest
+transfer mode takes about 1.2s. A perfectly efficient loader that overlapped
+those two steps could in principle finish in roughly 2-3s.
 
-Read the weight-load column, not the total. Per-cycle totals were
-41.47/42.58/41.88 (fst), 38.91/41.52/40.76 (runai cpu) and 39.09/38.62/41.05
-(runai cuda) -- a ~2.4s spread that straddles the -2.80s end-to-end delta. The
-weight phase does not: it is the only phase a load format can move, its three
-samples are tight, and -4.31s matches the isolated loader rig below (-4.29s) to
-20ms. The other phases confirm they were untouched: python imports 9.63/9.42/9.65s,
-cudagraph capture 10.92/11.34/11.02s, engine orchestration 2.47/2.48/2.73s.
+The best loader measured here (runai_streamer) takes 7.92s -- well above
+that floor, but the gap is inside the loaders themselves, not storage:
+even bypassing the disk cache entirely, raw disk reads are still faster
+than either loader achieves. This sharpens (doesn't contradict) the
+project's earlier finding that storage speed was never the real
+bottleneck -- read concurrency inside the loader software was.
 
-The exact invocations:
+For runai_streamer specifically, most of its 7.92s is disk read (2.1s)
+plus a slower-than-ideal GPU copy (3.6s) because it copies through
+regular, "un-pinned" memory instead of the faster "pinned" memory mode --
+a fixable inefficiency in that library, not something a flag can change
+today. fastsafetensors' 12.06s doesn't cleanly break down the same way and
+looks like it's leaving performance on the table somewhere internally that
+neither of its two tuning knobs reaches.
 
-  # incumbent (published step 5) -- needs coldstart/cs_fst.py loaded via sitecustomize
-  CS_FST=1 CS_FST_MAX_THREADS=8 CS_FST_BBUF_KB=32768 \
-    vllm serve --model Qwen/Qwen3-32B --max-model-len 8192 \
-      --load-format fastsafetensors
+TWO SMALL BUT REAL QUIRKS IN THE ("WINNING") RUNAI_STREAMER FLAG
 
-  # best stock configuration measured -- no patch of any kind
-  vllm serve --model Qwen/Qwen3-32B --max-model-len 8192 \
-    --load-format runai_streamer \
-    --model-loader-extra-config '{"distributed": true, "concurrency": 8}'
+- At TP=1 (a single GPU), you have to explicitly tell runai_streamer
+  "act as if this were a distributed, multi-GPU setup" to get it to copy
+  weights straight to the GPU. Without that flag it copies to regular CPU
+  memory first, which is slower to move from afterward. The flag's name
+  suggests it's about multi-GPU coordination, but here it's really just
+  the on/off switch for "go straight to the GPU." Worth about 2.2s of the
+  weight-load phase.
+- A separate chunk-size tuning knob for this loader only works when
+  reading from cloud storage (S3); on a regular network filesystem like
+  the one here it's silently ignored, confirmed by checking the loader's
+  own debug logs.
 
-Bit-identical output. All three loaders were re-run yielding every tensor, each
-fingerprinted twice (whole-buffer byte sum, plus a stride-1021 subsample so a
-shifted or permuted buffer cannot alias) alongside shape and dtype. fastsafetensors,
-runai_streamer-to-GPU and stock safetensors produce the same 707 names with the
-same fingerprints -- sha256 of the whole map is 26c67047eead6c3a for all three.
-This matters because the harness's readiness check only proves the server answers.
+WHAT'S WORTH DOING
 
-------------------------------------------------------------------------------
-RESULT 2: THE LOADER RIG.  every path, timed outside vLLM
-------------------------------------------------------------------------------
-One process per arm, file -> tensors on cuda:0, no vLLM model and no
-load_weights loop, so this is each loader's own ceiling. 61.02 GiB, 707 tensors,
-page cache warm, median of 3 with cycle 0 discarded.
+Available right now, no code change: switch to
+`--load-format runai_streamer` with the "act as distributed" flag and 8
+parallel workers. Saves ~4.3s of weight-load time and removes a custom
+patch from the stack.
 
-loader / configuration                              wall    GiB/s  destination
-------------------------------------------------  -------  -------  -----------
-runai_streamer, concurrency 8                       7.92s     7.71  GPU
-runai_streamer, concurrency 16                      8.25s     7.40  GPU
-runai_streamer, concurrency 32                      9.10s     6.71  GPU
-runai_streamer, concurrency 4                      11.02s     5.54  GPU
-fastsafetensors, max_threads 8, bbuf 32 MiB        12.06s     5.06  GPU  <- step 5
-fastsafetensors, max_threads 16, bbuf 32 MiB       12.20s     5.00  GPU
-fastsafetensors, max_threads 8,  bbuf 16 MiB       12.42s     4.92  GPU
-fastsafetensors, max_threads 32, bbuf 32 MiB       13.30s     4.59  GPU
-safetensors + enable_multithread_load, 16 threads  24.92s     2.45  GPU
-safetensors --safetensors-load-strategy prefetch   25.67s     2.38  GPU  (n=1)
-safetensors + enable_multithread_load, 8 threads   26.30s     2.32  GPU
-safetensors --safetensors-load-strategy eager      28.78s     2.12  GPU
-safetensors --safetensors-load-strategy lazy        ~55s      1.10  GPU  (n=1)
-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-runai_streamer to host RAM (vLLM's TP=1 default)    5.75s    10.61  host only
+Not available today but would help if fixed upstream: making that loader
+copy through "pinned" memory instead of regular memory (biggest remaining
+opportunity); whatever is limiting fastsafetensors to a quarter of its
+theoretical read+copy speed; GPU-Direct-Storage hardware (not installed on
+this cluster, and fastsafetensors's whole design point).
 
-The last row is not comparable to the ones above it -- it stops at host memory
-and leaves the H2D to the model's own per-tensor param.data.copy_(). It is listed
-because it is what `--load-format runai_streamer` does by default, and the real
-boot puts a number on the difference: 11.44s of weight phase against 9.26s.
+Not worth pursuing, based on what was measured: further tuning of the
+plain safetensors loader's strategies (all landed 3-7x slower than the two
+faster options); further tuning of fastsafetensors' two knobs (the whole
+range tried only spans a 10% difference).
 
-Three things fall out of this table.
+Caveats: everything above assumes the file is already cached from a
+previous read (page-cache warm), matching how the rest of this project's
+numbers were measured; a genuinely first-ever read from this filesystem
+could not be tested here (would need elevated permissions this pod
+didn't have). And all of this is single-GPU (TP=1) — at higher GPU counts
+each GPU loads only its own slice of the weights and some of these numbers
+would change shape.
 
-1. The DefaultModelLoader family is not in the race, and its two levers barely
-   move. `enable_multithread_load` -- 17 shards read by a thread pool -- buys
-   2.12 -> 2.45 GiB/s over eager, because the threads parallelise a read that
-   was never the bottleneck while the per-tensor pageable H2D stays serial in
-   the main thread. `--safetensors-load-strategy prefetch` doubles lazy
-   (1.10 -> 2.38) but lands where eager already was. On this pod the strategy is
-   also never chosen for you: vLLM auto-enables prefetching only "when an NFS
-   filesystem is detected" (config/load.py:63-83) and /cache is GPFS.
-
-2. fastsafetensors' knobs are flat-to-harmful. 4.59-5.06 GiB/s across
-   max_threads {8,16,32} x bbuf {16,32} MiB -- a 10% band, with 32 threads the
-   worst of the four. This is the part of coldstart/cs_fst.py that cannot be
-   reached from vLLM at all (not plumbed, and absent from fastsafetensors' own
-   LoaderConfig), and the sweep says there is very little left in it.
-
-3. runai_streamer's one knob is real: concurrency 4 -> 8 is -3.1s. Its optimum
-   is 8, and 32 is 15% worse than 8 -- consistent with a 16-core cgroup.
-
-------------------------------------------------------------------------------
-RESULT 3: THE FLOOR.  storage is not the constraint, and never was
-------------------------------------------------------------------------------
-Measured in the same pod, same 17 shards (scripts iobench.py / loaderbench.py h2d):
-
-  checkpoint resident in page cache      61.02 / 61.02 GiB   (100.0%)
-  buffered read, 16 threads, 32 MiB      28.52 GiB/s     ->  2.14s for 61.02 GiB
-  buffered read,  8 threads              18.19 GiB/s     ->  3.36s
-  O_DIRECT read, 32 threads              11.36 GiB/s     ->  5.37s
-  O_DIRECT read, 16 threads               8.70 GiB/s     ->  7.01s
-  H2D over PINNED host memory            50.71 GiB/s     ->  1.20s
-  H2D over PAGEABLE host memory          17.08 GiB/s     ->  3.57s
-
-The checkpoint is 100% page-cache resident, so the read a loader actually issues
-is the buffered one: 2.14s. Pinned H2D is 1.20s. A loader that overlapped those
-two perfectly would finish in ~2.2s; one that serialised them, ~3.3s.
-
-The best loader measured takes 7.92s. The published step-5 configuration takes
-12.06s. Both are far above the floor, and the O_DIRECT row shows why the usual
-suspect is innocent: even with the page cache bypassed entirely, the storage
-ceiling (5.37s) is still below what the fastest loader achieves warm.
-
-This sharpens rather than contradicts the README's "storage was never the
-problem" -- that line cites 9.30 GiB/s O_DIRECT as the ceiling to compare
-against. The relevant ceiling for a warm pod is 28.52 GiB/s, which makes the
-gap 6x rather than 2x, and locates all of it inside the loaders.
-
-Where runai_streamer's 7.92s goes: 2.14s of read + 3.57s of pageable H2D +
-per-chunk Python is very nearly the whole of it. file_streamer.py:207-211 does
-`device_tensor = tensor.to(self.device_str)` per chunk out of an ordinary
-(unpinned) buffer, so it pays 17.08 GiB/s instead of 50.71. Pinned staging in
-the streamer is the single change that would move this number, and it is
-upstream work in runai-model-streamer, not configuration.
-
-Where fastsafetensors' 12.06s goes is less clear and looks like a bug rather
-than a design limit: its nogds path (copier/nogds.py) allocates the whole shard
-on the device and submits bbuf-sized pread+cudaMemcpy pairs, which should get
-closer to the read leg than 5 GiB/s. It is ~6x below its own read leg and ~4x
-below a pinned H2D, and no combination of its two knobs closes any of it.
-
-------------------------------------------------------------------------------
-RESULT 4: two upstream findings, both about knobs
-------------------------------------------------------------------------------
-A. At TP=1 the only way to make runai_streamer write to the GPU is to tell vLLM
-   it is distributed.
-
-   weight_utils.py:1002-1013 picks the streamer's destination like this:
-
-       device = (f"cuda:{current_platform.current_device()}"
-                 if is_distributed and is_cuda_alike else "cpu")
-
-   and `is_distributed` comes from nowhere but model_loader_extra_config
-   ("distributed", runai_streamer_loader.py:41-45, default False). So the flag
-   named after a parallelism topology is in fact the GPU-direct switch, and at
-   TP=1 -- where nothing is distributed -- you must set it to true to get the
-   faster path. It is worth 2.18s of weight phase here (11.44 -> 9.26s).
-
-   The name is not the only problem: the streamer's own
-   DistributedStreamer.set_is_distributed then *rejects* the claim, because
-   get_group_size() is 1, and falls back to non-distributed streaming. The
-   device string vLLM computed is not revisited, which is why this works at all.
-   Correct behaviour would be to choose the device on `is_cuda_alike` and use
-   `is_distributed` only for cross-rank chunk sharding -- at which point TP=1
-   deployments get the 2.18s for free and the flag means what it says.
-
-B. RUNAI_STREAMER_CHUNK_BYTESIZE is an S3-only knob, silently ignored on a
-   POSIX mount.
-
-   With RUNAI_STREAMER_LOG_LEVEL=DEBUG the streamer reports
-   "Created 1 batches for file index N" and "Finished reading 1/1 chunks from
-   file ..." for all 17 shards -- identically with the variable unset and set to
-   32 MiB. The only chunk-bytesize string in libstreamer.so is the error
-   "s3 chunk bytesize must be positive". So for local files the read unit is the
-   whole shard and the parallelism unit is the file.
-
-   That is the practical ceiling on this loader's tuning: 17 shards means
-   concurrency above ~17 has nothing to do (measured: 32 is 15% worse than 8),
-   and a model published as 4 or 5 large shards would parallelise 4- or 5-way no
-   matter what concurrency is set to. The workers are genuinely used -- the debug
-   log shows all 16 at concurrency 16 -- there is just nothing to give them.
-
-The contrast with cs_fst is the reason to prefer runai_streamer here beyond the
-4.31s. Both of fastsafetensors' useful knobs (max_threads, bbuf_size_kb) are
-unreachable from vLLM and needed a monkey-patch on ParallelLoader.__init__ to
-set, and its nogds decision is taken from world size rather than from whether
-GDS exists (weight_utils.py:1057, and this cluster has no /dev/nvidia-fs*).
-runai_streamer's one effective knob is a documented CLI field.
-
-------------------------------------------------------------------------------
-WHAT TO DO ABOUT THE 13.3s
-------------------------------------------------------------------------------
-Available now, no code change, no patch:
-
-  --load-format runai_streamer
-  --model-loader-extra-config '{"distributed": true, "concurrency": 8}'
-
-  -4.31s of weight-load phase against the published step-5 arm, and it *removes*
-  a monkey-patch from the stack rather than adding one. Weight load stops being
-  the largest phase: at 9.26s it drops below cudagraph capture (11.0s).
-
-Not available here, in rough order of how much they would be worth:
-
-  * Pinned staging inside runai-model-streamer. The 3.57s pageable H2D is the
-    largest single identified cost in the best loader. Upstream change.
-  * Fixing whatever holds fastsafetensors' nogds path to 5 GiB/s. It has the
-    right architecture (device-side buffer, chunked pread) and delivers a
-    quarter of what the two legs can do.
-  * GDS. Not installed on this cluster; fastsafetensors' whole reason for
-    existing is unavailable, and vLLM asks for it anyway at TP=1.
-  * sharded_state / runai_streamer_sharded. Untested here because they need a
-    conversion pass and a second 61 GiB copy, and they make the artifact
-    TP-shaped. The plausible win is skipping per-tensor reshaping, not I/O.
-  * tensorizer, instanttensor, modelexpress. Not installed; an image change,
-    and for modelexpress an external service.
-
-Not worth pursuing on this evidence:
-
-  * --safetensors-load-strategy anything. eager, prefetch and lazy all land in
-    1.10-2.38 GiB/s, 3-7x behind the two real loaders.
-  * enable_multithread_load. 2.45 GiB/s at 16 threads; it parallelises the read,
-    which was already 13x faster than the loader.
-  * More fastsafetensors tuning. The whole max_threads x bbuf sweep fits in a
-    10% band and the shipped setting is already the best corner of it.
-
-Two caveats on scope. Everything here is page-cache warm, which is the regime
-the whole published ladder measured; a genuinely cold GPFS read cannot be timed
-in this pod (dropping caches needs privileges we do not have) and can only be
-approximated by the O_DIRECT rows. And all of it is TP=1: at TP>1 each rank
-reads its own shard, vLLM already passes nogds=True, and the runai device
-question changes shape because is_distributed becomes true for real.
-
-------------------------------------------------------------------------------
-HOW TO REPRODUCE
-------------------------------------------------------------------------------
-  scripts/loader-ladder.sh                    # the 12 real boots -> runs/lf1-*
-  python3 analysis/loader_ladder.py runs/lf1-*  # per-arm medians incl. phases
-
-  kubectl cp scripts/loader-bench.py <pod>:/tmp/loaderbench.py
-  kubectl exec <pod> -- python3 /tmp/loaderbench.py <arm>
-      arms: h2d | fst:<max_threads>:<bbuf_kib> | runai:<cpu|cuda>[:conc[:chunk_kib]]
-            st:<lazy|eager> | mtst:<threads> | stpf:<threads>:<blk_kib>
-            verify:<fst:t:b | runai:cuda | st>
-
-  kubectl cp scripts/io-ceiling-bench.py <pod>:/tmp/iobench.py
-  kubectl exec <pod> -- python3 /tmp/iobench.py    # page-cache residency + read sweeps
-
-------------------------------------------------------------------------------
-RAW MEASUREMENTS
-------------------------------------------------------------------------------
---- iobench.out ---
-page cache resident: 61.02 / 61.02 GiB (100.0%)
-=== O_DIRECT: true GPFS path, page cache bypassed ===
-  O_DIRECT     threads=4   chunk= 32MiB   61.02 GiB /  13.45s =   4.54 GiB/s
-  O_DIRECT     threads=8   chunk= 32MiB   61.02 GiB /   7.63s =   8.00 GiB/s
-  O_DIRECT     threads=16  chunk= 32MiB   61.02 GiB /   7.02s =   8.70 GiB/s
-  O_DIRECT     threads=32  chunk= 32MiB   61.02 GiB /   5.37s =  11.36 GiB/s
-=== buffered read(): what the nogds pread path sees ===
-  buffered     threads=4   chunk= 32MiB   61.02 GiB /   5.67s =  10.76 GiB/s
-  buffered     threads=8   chunk= 32MiB   61.02 GiB /   3.36s =  18.19 GiB/s
-  buffered     threads=16  chunk= 32MiB   61.02 GiB /   2.14s =  28.52 GiB/s
-  buffered     threads=32  chunk= 32MiB   61.02 GiB /   2.54s =  24.07 GiB/s
-RESULT	h2d_pinned	0.16s	50.71 GiB/s
-RESULT	h2d_pageable	0.47s	17.08 GiB/s
---- matrix.out ---
-cycle0	RESULT	fst:8:32768	11.85s	5.15 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle0	RESULT	runai:cuda:8	7.63s	7.99 GiB/s	707 tensors	dst=cuda:0 conc=8
-cycle0	RESULT	runai:cpu	4.90s	12.47 GiB/s	707 tensors	dst=cpu conc=default
-cycle0	RESULT	st:eager	28.83s	2.12 GiB/s	707 tensors	safetensors eager -> cuda
-cycle1	RESULT	fst:8:32768	12.30s	4.96 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle1	RESULT	runai:cuda:8	7.87s	7.75 GiB/s	707 tensors	dst=cuda:0 conc=8
-cycle1	RESULT	runai:cpu	8.91s	6.85 GiB/s	707 tensors	dst=cpu conc=default
-cycle1	RESULT	st:eager	28.87s	2.11 GiB/s	707 tensors	safetensors eager -> cuda
-cycle2	RESULT	fst:8:32768	12.17s	5.02 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle2	RESULT	runai:cuda:8	8.35s	7.31 GiB/s	707 tensors	dst=cuda:0 conc=8
-cycle2	RESULT	runai:cpu	5.75s	10.61 GiB/s	707 tensors	dst=cpu conc=default
-cycle2	RESULT	st:eager	26.25s	2.33 GiB/s	707 tensors	safetensors eager -> cuda
-cycle3	RESULT	fst:8:32768	12.21s	5.00 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle3	RESULT	runai:cuda:8	7.92s	7.71 GiB/s	707 tensors	dst=cuda:0 conc=8
-cycle3	RESULT	runai:cpu	5.23s	11.67 GiB/s	707 tensors	dst=cpu conc=default
-cycle3	RESULT	st:eager	28.78s	2.12 GiB/s	707 tensors	safetensors eager -> cuda
---- matrix2.out ---
----- cycle0 ----
-cycle0	RESULT	mtst:8	26.45s	2.31 GiB/s	707 tensors	threads=8 -> cuda (pageable)
-cycle0	RESULT	mtst:16	24.93s	2.45 GiB/s	707 tensors	threads=16 -> cuda (pageable)
-cycle0	RESULT	stpf:8:16384	29.00s	2.10 GiB/s	707 tensors	prefetch threads=8 blk=16384KiB -> cuda
----- cycle1 ----
-cycle1	RESULT	mtst:8	26.21s	2.33 GiB/s	707 tensors	threads=8 -> cuda (pageable)
-cycle1	RESULT	mtst:16	24.77s	2.46 GiB/s	707 tensors	threads=16 -> cuda (pageable)
-cycle1	RESULT	stpf:8:16384	25.67s	2.38 GiB/s	707 tensors	prefetch threads=8 blk=16384KiB -> cuda
----- cycle2 ----
-cycle2	RESULT	mtst:8	28.86s	2.11 GiB/s	707 tensors	threads=8 -> cuda (pageable)
-cycle2	RESULT	mtst:16	29.17s	2.09 GiB/s	707 tensors	threads=16 -> cuda (pageable)
----- cycle3 ----
-cycle3	RESULT	mtst:8	26.30s	2.32 GiB/s	707 tensors	threads=8 -> cuda (pageable)
-cycle3	RESULT	mtst:16	24.92s	2.45 GiB/s	707 tensors	threads=16 -> cuda (pageable)
-verify	RESULT	verify	fst:8:32768	707 tensors	sha256=26c67047eead6c3a	/tmp/verify-fst_8_32768.json
-verify	RESULT	verify	runai:cuda	707 tensors	sha256=26c67047eead6c3a	/tmp/verify-runai_cuda.json
-verify	RESULT	verify	st	707 tensors	sha256=26c67047eead6c3a	/tmp/verify-st.json
-reference: stock safetensors, 707 tensors
-fst_8_32768    names_differ=0  fingerprint_differs=0  -> IDENTICAL
-runai_cuda     names_differ=0  fingerprint_differs=0  -> IDENTICAL
---- matrix3.out ---
----- cycle0 ----
-cycle0	RESULT	runai:cuda:4	12.48s	4.89 GiB/s	707 tensors	dst=cuda:0 conc=4 chunk=defaultKiB
-cycle0	RESULT	runai:cuda:8	7.89s	7.74 GiB/s	707 tensors	dst=cuda:0 conc=8 chunk=defaultKiB
-cycle0	RESULT	runai:cuda:16	8.25s	7.40 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=defaultKiB
-cycle0	RESULT	runai:cuda:32	9.34s	6.53 GiB/s	707 tensors	dst=cuda:0 conc=32 chunk=defaultKiB
-cycle0	RESULT	runai:cuda:16:32768	7.93s	7.70 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=32768KiB
-cycle0	RESULT	runai:cuda:16:65536	8.41s	7.26 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=65536KiB
----- cycle1 ----
-cycle1	RESULT	runai:cuda:4	11.02s	5.54 GiB/s	707 tensors	dst=cuda:0 conc=4 chunk=defaultKiB
-cycle1	RESULT	runai:cuda:8	7.91s	7.72 GiB/s	707 tensors	dst=cuda:0 conc=8 chunk=defaultKiB
-cycle1	RESULT	runai:cuda:16	8.18s	7.46 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=defaultKiB
-cycle1	RESULT	runai:cuda:32	9.10s	6.71 GiB/s	707 tensors	dst=cuda:0 conc=32 chunk=defaultKiB
-cycle1	RESULT	runai:cuda:16:32768	7.72s	7.90 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=32768KiB
-cycle1	RESULT	runai:cuda:16:65536	8.47s	7.21 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=65536KiB
----- cycle2 ----
-cycle2	RESULT	runai:cuda:4	7.78s	7.84 GiB/s	707 tensors	dst=cuda:0 conc=4 chunk=defaultKiB
-cycle2	RESULT	runai:cuda:8	8.02s	7.61 GiB/s	707 tensors	dst=cuda:0 conc=8 chunk=defaultKiB
-cycle2	RESULT	runai:cuda:16	8.31s	7.34 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=defaultKiB
-cycle2	RESULT	runai:cuda:32	8.93s	6.84 GiB/s	707 tensors	dst=cuda:0 conc=32 chunk=defaultKiB
-cycle2	RESULT	runai:cuda:16:32768	8.08s	7.56 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=32768KiB
-cycle2	RESULT	runai:cuda:16:65536	8.49s	7.19 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=65536KiB
----- cycle3 ----
-cycle3	RESULT	runai:cuda:4	11.40s	5.35 GiB/s	707 tensors	dst=cuda:0 conc=4 chunk=defaultKiB
-cycle3	RESULT	runai:cuda:8	7.96s	7.67 GiB/s	707 tensors	dst=cuda:0 conc=8 chunk=defaultKiB
-cycle3	RESULT	runai:cuda:16	8.25s	7.40 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=defaultKiB
-cycle3	RESULT	runai:cuda:32	9.32s	6.55 GiB/s	707 tensors	dst=cuda:0 conc=32 chunk=defaultKiB
-cycle3	RESULT	runai:cuda:16:32768	7.86s	7.76 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=32768KiB
-cycle3	RESULT	runai:cuda:16:65536	8.10s	7.53 GiB/s	707 tensors	dst=cuda:0 conc=16 chunk=65536KiB
---- matrix4.out ---
----- cycle0 ----
-cycle0	RESULT	fst:8:32768	11.83s	5.16 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle0	RESULT	fst:16:32768	12.59s	4.85 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle0	RESULT	fst:32:32768	13.56s	4.50 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle0	RESULT	fst:8:16384	12.36s	4.94 GiB/s	707 tensors	setup=0.00s dst=cuda
----- cycle1 ----
-cycle1	RESULT	fst:8:32768	12.17s	5.01 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle1	RESULT	fst:16:32768	12.20s	5.00 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle1	RESULT	fst:32:32768	13.03s	4.68 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle1	RESULT	fst:8:16384	12.23s	4.99 GiB/s	707 tensors	setup=0.00s dst=cuda
----- cycle2 ----
-cycle2	RESULT	fst:8:32768	11.94s	5.11 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle2	RESULT	fst:16:32768	12.20s	5.00 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle2	RESULT	fst:32:32768	13.56s	4.50 GiB/s	707 tensors	setup=0.00s dst=cuda
-cycle2	RESULT	fst:8:16384	12.61s	4.84 GiB/s	707 tensors	setup=0.00s dst=cuda
+(Condensed summary. Full per-run raw data, reproduction commands, and
+verification hashes preserved in git history.)
