@@ -184,8 +184,9 @@ table.data tr:last-child td{border-bottom:none;}
 <section class="slide divider">
   <span class="part-pill p1">Part 1 of 2</span>
   <h1>vLLM cold start: time breakdown &amp; improvement</h1>
-  <p>Where a Qwen3-32B boot spends its 43.3s on one H100 &mdash; what shrinks it for free, what would need an
-  upstream fix, and what config change quietly makes serving worse to buy the number down.</p>
+  <p>A Qwen3-32B boot on one H100 now reaches ready in 36.87s, down from 90.65s stock. This part shows where
+  that time goes, what's free to fix, what needs an upstream change, and one config change that buys speed by
+  quietly making serving worse.</p>
 </section>
 
 <!-- Slide 2: Methodology & hardware -->
@@ -232,15 +233,49 @@ table.data tr:last-child td{border-bottom:none;}
       instrumentation is missing a patch, not that the number is fuzzy.</p></div>
     </div>
 
-    <div class="gap-box"><b>Rigor, and where it still runs out:</b> the TP=1 numbers come from controlled, median-of-3
-    harness runs (<span class="cite">runs/lad2-*</span>, <span class="cite">runs/w6-*</span>), and the TP=2 <em>boot</em> numbers now
-    do too &mdash; the same seven arms, 3 repeats each, 21 runs (<span class="cite">runs/tp2-*</span>,
-    <a class="cite" href="scripts/tp2-ladder.sh">scripts/tp2-ladder.sh</a>), plus a matched-context pair at
-    <span class="cite">--max-model-len 8192</span> (<span class="cite">runs/tp2m8k-*</span>) so capture and weight load can be
-    compared across TP without a context-length confound. The next two slides are that result.
-    What is <em>still</em> one uncontrolled live-demo sample at TP=2 is everything in <b>Part 2</b>: the sleep-mode
-    baseline, the checkpoint/restore round trip, and the artifact sizes
-    (<a class="cite" href="docs/pending-experiments.md">pending experiments #3, #5, #6, #7</a>). Those slides say so where they appear.</div>
+    <div class="gap-box"><b>What's controlled, and what isn't yet:</b> the TP=1 numbers come from median-of-3
+    harness runs (<span class="cite">runs/lad2-*</span>, <span class="cite">runs/w6-*</span>), and so do the TP=2 <em>boot</em>
+    numbers &mdash; the same seven arms, 3 repeats each, 21 runs (<span class="cite">runs/tp2-*</span>,
+    <a class="cite" href="scripts/tp2-ladder.sh">scripts/tp2-ladder.sh</a>), plus a matched pair at
+    <span class="cite">--max-model-len 8192</span> (<span class="cite">runs/tp2m8k-*</span>) so capture and weight load compare
+    across TP without a context-length confound.
+    Everything in <b>Part 2</b> &mdash; the sleep-mode baseline, the checkpoint/restore round trip, and the artifact
+    sizes &mdash; is still one live-demo sample at TP=2
+    (<a class="cite" href="docs/pending-experiments.md">pending experiments #3, #5, #6, #7</a>), flagged where it appears.</div>
+  </div>
+</section>
+
+<!-- Slide 2b: VLLM_ENABLE_STARTUP_PLAN -->
+<section class="slide">
+  <h2>Part 1 &middot; A constant worth explaining</h2>
+  <h1>VLLM_ENABLE_STARTUP_PLAN: a real 0.6s, and a log line that overstates it</h1>
+  <div class="content">
+    <p class="lede">Every arm in this deck runs with <span class="cite">VLLM_ENABLE_STARTUP_PLAN=1</span> set, so it never
+    shows up as a row in any ladder &mdash; it's a constant, not a step. vLLM saves the result of its memory-profiling
+    pass (the free-memory baseline and the <span class="cite">--kv-cache-memory</span> value it computed) to
+    <span class="cite">$VLLM_CACHE_ROOT/startup_plan/</span>, keyed by a hardware-plus-config fingerprint. A later boot
+    that matches the fingerprint, with at least as much free GPU memory as recorded, skips profiling.</p>
+
+    <div class="tp-row">
+      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">first boot, this fingerprint</span><span class="val">2.01s</span><span class="unit"><span class="cite">kvcache.determine_memory</span> &middot; writes the plan</span></div>
+      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">repeat boot, plan applied</span><span class="val">1.37s</span><span class="unit">same call &middot; &minus;0.6s</span></div>
+      <div class="tp-badge gap"><span class="dot"></span><span class="lbl">sample size</span><span class="val">1 pair</span><span class="unit">Qwen2.5-1.5B-Instruct, not a median of 3 &middot; treat 0.6s as an order of magnitude</span></div>
+    </div>
+
+    <div class="grid2" style="margin-top:14px;">
+      <div class="card"><h3>Why it's a constant, not a lever</h3><p>It never pays on the first boot of a given
+      fingerprint &mdash; that boot is the one writing the plan. Every arm in every ladder in this deck is past its
+      first boot, so it's already helping the baseline in every table; the reductions reported elsewhere would be
+      slightly larger without it.</p></div>
+      <div class="card"><h3>What the log line gets wrong</h3><p>On a skipped boot, vLLM logs
+      <span class="cite">Memory profiling will be skipped</span> and then calls
+      <span class="cite">profile_run()</span> anyway &mdash; <b>2.31s</b>, because that pass also compiles the model for
+      <span class="cite">max_num_batched_tokens</span> and vLLM still needs it. What the flag actually skips is the
+      <span class="cite">memory_profiling</span> context and <span class="cite">profile_cudagraph_memory()</span>, not
+      the forward pass. Reading the log line at face value overstates the saving by roughly 4&times;. Documentation
+      bug, unfiled.</p></div>
+    </div>
+    <small class="note"><span class="cite">runs/20260901-191644-r1</span> / <span class="cite">-r2</span> &middot; docs/kubernetes.md#constants-not-steps</small>
   </div>
 </section>
 
@@ -261,10 +296,9 @@ table.data tr:last-child td{border-bottom:none;}
 
     <div class="section-title" style="margin-top:30px;">Same measurement, TP=1 vs TP=2, single run each &middot; <a class="cite" href="reports/demo-cold-start-tp1-20260903-105740.txt">reports/demo-cold-start-tp1-&hellip;.txt</a> / <a class="cite" href="reports/demo-cold-start-tp2-20260903-110308.txt">reports/demo-cold-start-tp2-&hellip;.txt</a></div>
     <div class="bar-list" id="demobars"></div>
-    <small class="note">The controlled ladder has since backed this pair up rather than replaced it: its TP=2
-    baseline arm lands at <b>94.7s</b> median (140 / 88.3 / 94.7) against this demo boot's 95.79s, and its TP=1
-    baseline at 90.65s. The demo script's value was never the number &mdash; it was measuring both TPs with one
-    command.</small>
+    <small class="note">The controlled ladder confirms this pair: TP=2 baseline is <b>94.7s</b> median (140 / 88.3 /
+    94.7) against this single demo boot's 95.79s, and TP=1 baseline is 90.65s. The demo script measures both TPs with
+    one command; the ladder is the number to cite.</small>
 
     <div class="section-title" style="margin-top:30px;">A warm cache is not one thing &mdash; it's at least four caches</div>
     <div class="toggle" id="cachetoggle">
@@ -315,13 +349,13 @@ table.data tr:last-child td{border-bottom:none;}
     registry-cold ladder, so there is no first-boot number for it yet. The registry phase should stay flat at ~6.5s: no
     load format changes how that child imports.</small>
 
-    <div class="gap-box" style="border-style:solid;"><b>The finding is not the extra 7&ndash;15s &mdash; it is that the registry phase is not a constant tax.</b>
+    <div class="gap-box" style="border-style:solid;"><b>The registry phase is not a constant tax.</b>
     Step 2 more than halves it, <b>14.6s &rarr; 6.66s</b>, because the registry child is <em>itself</em> a full
     <span class="cite">import vllm</span> and <span class="cite">PYTHONPYCACHEPREFIX</span> discounts its bytecode
-    compilation exactly as it discounts the parent's. So step 2's real first-boot win is <b>&minus;26.19s</b>, 3.9s larger
-    than the warm ladder could show &mdash; and <b>no registry-warm run could ever have found it</b>, because warm the
-    phase is 10&ndash;33ms. Steps 3&ndash;5 leave it flat at 6.5&ndash;6.9s, which is correct: none of them changes how that child
-    imports, since it is spawned during config resolution before the engine core exists.</div>
+    compilation exactly as it discounts the parent's. Step 2's real first-boot win is <b>&minus;26.19s</b>, 3.9s larger
+    than a registry-warm ladder can show, since warm the phase is only 10&ndash;33ms. Steps 3&ndash;5 leave it flat at
+    6.5&ndash;6.9s: none of them changes how that child imports, since it's spawned during config resolution before the
+    engine core exists.</div>
 
     <div class="section-title" style="margin-top:22px;">Where this ladder and the published one disagree, and why</div>
     <div class="grid2">
@@ -348,10 +382,9 @@ table.data tr:last-child td{border-bottom:none;}
       <tr><td>5 cs_fst tuned</td><td>50.1s</td><td>6.94s</td><td>43.2s</td><td class="strong">42.3s</td><td><b style="color:var(--good)">+0.90s</b> against a 1.93s spread &mdash; and 42.3s reproduces the published 43.30s to 1.0s</td></tr>
     </table>
     <small class="note">Cold and warm of each arm ran back to back so nothing else about the cache state differed. The
-    subtraction is therefore a measurement of the warm case at the tuned end, and good to a few seconds at the baseline end
-    &mdash; the same arm the published table already shows spanning 85.08&ndash;91.22s. One hypothesis was tested and
-    <b>rejected</b>: that the registry subprocess pre-warms the page cache for the parent's own imports, which would make the
-    subtraction overstate the saving. It does not &mdash; warm cycle c2 beat <em>every</em> cold cycle in both
+    subtraction is a measurement of the warm case at the tuned end, and good to a few seconds at the baseline end
+    &mdash; the same arm the published table already shows spanning 85.08&ndash;91.22s. The registry subprocess does not
+    pre-warm the page cache for the parent's own imports: warm cycle c2 beat <em>every</em> cold cycle in both
     <span class="cite">python imports</span> and <span class="cite">weight load</span>, so the baseline's &minus;4.82s is node
     noise, not a mechanism.</small>
   </div>
@@ -375,26 +408,28 @@ table.data tr:last-child td{border-bottom:none;}
       <tr><td><span class="cite">VLLM_WORKER_MULTIPROC_METHOD=fork</span></td><td>&minus;4.97s</td><td class="strong">0</td><td><b style="color:var(--serious)">dies &mdash; vetoed.</b> +0.7s, i.e. noise. vLLM reverts it to <span class="cite">spawn</span> behind your back; the box below is why.</td></tr>
       <tr><td><span class="cite">forkserver</span> preload (probe)</td><td>parity</td><td class="strong">0</td><td><b style="color:var(--serious)">dies &mdash; same veto.</b> <span class="cite">forkserver.summary {"served": 0, "declined": ["CUDA is initialized"]}</span>.</td></tr>
       <tr><td><span class="cite">--load-format fastsafetensors</span></td><td>&minus;15.73s</td><td class="strong">&minus;6.2s</td><td><b style="color:var(--good)">survives at ~40%.</b> Weight load 14.3 &rarr; 8.81s. Two ranks already read their own shards in parallel, so there was less serialization left for it to remove.</td></tr>
-      <tr><td><span class="cite">cs_fst</span> &mdash; <span class="cite">nogds=True</span></td><td rowspan="2">&minus;4.34s<br>(both together)</td><td class="strong">&minus;0.14s</td><td><b style="color:var(--serious)">structurally dead.</b> <span class="cite">weight_utils.py:1057</span> computes <span class="cite">nogds = pg.size() &gt; 1</span> &mdash; at TP=2 vLLM already passes what the patch existed to force.</td></tr>
+      <tr><td><span class="cite">cs_fst</span> &mdash; <span class="cite">nogds=True</span></td><td rowspan="2">&minus;4.34s<br>(both together)</td><td class="strong">&minus;0.14s</td><td><b style="color:var(--serious)">dead: vLLM already does this.</b> <span class="cite">weight_utils.py:1057</span> computes <span class="cite">nogds = pg.size() &gt; 1</span> &mdash; at TP=2 vLLM already passes what the patch existed to force.</td></tr>
       <tr><td><span class="cite">cs_fst</span> &mdash; <span class="cite">max_threads=8</span>, <span class="cite">bbuf_size_kb=32768</span></td><td class="strong">&minus;0.63s</td><td>in-phase only: visible inside <span class="cite">weight load</span>, gone by <span class="cite">health_200</span>.</td></tr>
     </table>
-    <small class="note">Because steps 3 and 3b are off the adopted chain, the 52.7s endpoint is
+    <small class="note">Steps 3 and 3b are off the adopted chain, so the 52.7s endpoint here is
     <span class="cite">pycache + fastsafetensors</span> &mdash; a two-lever stack, even though the arms that produced it had
-    <span class="cite">fork</span> requested and overridden.</small>
+    <span class="cite">fork</span> requested and overridden. The loader slides later in this deck put instanttensor's
+    TP=2 ready at 53.52s from a separate run set (<span class="cite">runs/lt2-*</span>) &mdash; about a second higher on
+    a ~53s total, within this ladder's own run-to-run spread. instanttensor is the adopted TP=2 loader, same as TP=1.</small>
 
-    <div class="gap-box" style="border-style:solid;"><b>Why both process-model levers die &mdash; root-caused, not shrugged at:</b>
-    at TP=2, CUDA is <em>already initialised</em> in the process that launches the engine. In <b>21 of 21</b> TP=2 runs
+    <div class="gap-box" style="border-style:solid;"><b>Why both process-model levers die:</b>
+    at TP=2, CUDA is already initialised in the process that launches the engine. In <b>21 of 21</b> TP=2 runs
     <span class="cite">cuda.lazy_init</span> fires 3.4&ndash;6.0s <em>before</em> <span class="cite">engine.core_proc_manager</span>,
-    inside <span class="cite">config.create_engine_config</span>; in the TP=1 runs traced with the same probe it never fires
-    there at all. <span class="cite">_maybe_force_spawn()</span> sees an initialised context and overrides
+    inside <span class="cite">config.create_engine_config</span>; it never fires there in the TP=1 runs traced with the same
+    probe. <span class="cite">_maybe_force_spawn()</span> sees an initialised context and overrides
     <span class="cite">fork</span> back to <span class="cite">spawn</span>. The chain is TP-specific by construction:
     <span class="cite">config/compilation.py:195</span> guards on <span class="cite">world_size in [2,4,8,16]</span> &rarr;
     <span class="cite">default_fi_allreduce_fusion_max_size_mb</span> imports <span class="cite">allreduce_rms_fusion</span> just to
     read a constant &rarr; <span class="cite">import flashinfer</span> at module scope &rarr; <span class="cite">jit/env.py:161</span>
     builds a <span class="cite">CompilationContext()</span> <em>to name a cache directory</em> &rarr;
-    <span class="cite">get_device_capability()</span> &rarr; <span class="cite">_lazy_init()</span>. So the prediction that a
-    forkserver preload "should pay at TP&gt;1, where one preload serves N workers" is not refuted here &mdash; it is
-    <em>untestable</em> until that import-time CUDA touch moves behind the guard it is hiding inside.</div>
+    <span class="cite">get_device_capability()</span> &rarr; <span class="cite">_lazy_init()</span>. A forkserver preload could
+    still pay off at TP&gt;1, where one preload serves N workers &mdash; but that can't be tested until this import-time
+    CUDA touch moves behind the guard it's hiding inside.</div>
   </div>
 </section>
 
@@ -432,7 +467,7 @@ table.data tr:last-child td{border-bottom:none;}
         exactly what "each rank reads its own shard" predicts, and it is what weight load delivers. Capture manages only
         <b>&minus;21%</b>, not the &minus;50% that "each rank captures half a model" would predict &mdash; because the per-size
         launch overhead across <b>51 sizes &times; 2 modes</b> does not divide by rank count even though the per-rank
-        forward does. That undivided residue is precisely what an on-demand-capture design would have to attack.</p></div>
+        forward does. An on-demand-capture design would have to attack that undivided residue.</p></div>
         <small class="note">Both endpoints were re-run at 8192 rather than compared as-found: capture is the one phase
         that could plausibly depend on context length. It turns out barely to &mdash; <b>8.74s at 8192 vs ~8.7s at
         40960</b> &mdash; so the mismatch that prompted the re-run did not change the reading. Re-anchoring the other way,
@@ -564,8 +599,8 @@ table.data tr:last-child td{border-bottom:none;}
     metadata read, so striping the data is the evident intent &mdash; but both ranks' byte counters read the full
     61.02 GiB and the per-rank read leg is flat across TP. A striped two-rank read and a lone rank both land on the same
     ~11.2 GiB/s mount ceiling, so the timing cannot tell them apart, and no probe here counts block-device reads per
-    rank. Either way the lever was never TP striping: <b>one rank already saturates this mount</b>, which is precisely
-    why the other two loaders catch up at TP=2 and instanttensor gains only 0.20s.</div>
+    rank. Either way the lever was never TP striping: <b>one rank already saturates this mount</b>, which is why the
+    other two loaders catch up at TP=2 and instanttensor gains only 0.20s.</div>
   </div>
 </section>
 
@@ -648,7 +683,7 @@ table.data tr:last-child td{border-bottom:none;}
 <!-- Slide 5: The bottleneck -->
 <section class="slide">
   <h2>Part 1 &middot; The bottleneck</h2>
-  <h1>CUDA graph capture: 11.4s that configuration cannot honestly remove</h1>
+  <h1>CUDA graph capture: 11.4s that no configuration lever removes</h1>
   <div class="content">
     <div class="tp-row">
       <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">TP=1 &middot; capture cost</span><span class="val">11.4s</span><span class="unit">26% of 43.4s &middot; 51 sizes &rarr; <b>3366</b> CUDA graphs</span></div>
@@ -667,7 +702,7 @@ table.data tr:last-child td{border-bottom:none;}
     <div class="section-title" style="margin-top:22px;">Every configuration lever spends steady-state inference to buy it back (TP=1, median of 3)</div>
     <div class="bar-list" id="leverbars"></div>
     <small class="note">10 capture sizes pads every batch that lands in a gap <b>up</b> to the next captured size &mdash;
-    a batch of 129 runs as 256, for the life of the server. This harness is structurally blind to that cost:
+    a batch of 129 runs as 256, for the life of the server. This harness does not measure that cost:
     <span class="cite">first_token &minus; health_200</span> is 43ms in every arm, because batch size 1 is captured in all of them.</small>
 
     <div class="section-title" style="margin-top:22px;">Refined breakdown (<span class="cite">runs/w6-*</span>, feeds the on-demand-capture proposal)</div>
@@ -688,10 +723,9 @@ table.data tr:last-child td{border-bottom:none;}
   <h2>Part 1 &middot; Inside the bottleneck</h2>
   <h1>The 11.4s has a 4-second line in it, and it isn't vLLM's code</h1>
   <div class="content">
-    <p class="lede">Asking whether captures could run <em>concurrently</em> produced two corrections before it produced
-    an answer. First a count: this deck said 102 graphs, because the trace floors capture spans at 5ms. With the floor
-    removed, the real number is <b>3366</b>. Second, what that changes &mdash; torch runs a
-    <span class="cite">synchronize()</span> and an <span class="cite">empty_cache()</span> before <em>each</em> of them.</p>
+    <p class="lede">The trace's default 5ms span floor undercounts captures: removing it puts the real count at
+    <b>3366</b> graphs, not 102. Torch runs a <span class="cite">synchronize()</span> and an
+    <span class="cite">empty_cache()</span> before <em>each</em> of them.</p>
 
     <div class="tp-row">
       <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">graphs captured</span><span class="val">3366</span><span class="unit">= 51 &times; (65 + 1) &mdash; not 102</span></div>
@@ -737,8 +771,8 @@ table.data tr:last-child td{border-bottom:none;}
       <tr><td>upstream: prologue inside all 3366 captures &middot; <a class="cite" href="reports/hi1-base-c1-instanttensor-upstream.txt">median run</a></td><td>11.69s</td><td class="strong">37.67s</td><td>73.37 GiB</td></tr>
       <tr style="background:color-mix(in srgb, var(--good) 9%, transparent);"><td><b>hoisted: one call after <span class="cite">capture_model</span></b> &middot; <a class="cite" href="reports/hi1-hoist-c1-instanttensor-hoisted.txt">median run</a></td><td><b>6.88s <span style="color:var(--good)">(&minus;4.81s)</span></b></td><td class="strong"><b>32.23s <span style="color:var(--good)">(&minus;5.44s)</span></b></td><td><b>73.37 GiB <span style="color:var(--good)">(+0.00)</span></b></td></tr>
     </table>
-    <small class="note">So the fix survives the loader change &mdash; it was priced when weight load was 13.3s and it is
-    the same size now that weight load is 7.7s, which is what "independent phases" is supposed to mean. Per-cycle totals
+    <small class="note">The fix survives the loader change: it was priced when weight load was 13.3s and stays the
+    same size now that weight load is 7.7s &mdash; the two phases are independent. Per-cycle totals
     37.67 / 39.35 / 37.42s (upstream) vs 32.23 / 31.33 / 33.40s (hoisted): the <em>slowest</em> hoisted cycle is 4.02s
     ahead of the <em>fastest</em> upstream one. Two honest deductions: the ready delta is 0.63s larger than the phase
     delta because python imports (10.23&rarr;9.67s) and warmup (3.86&rarr;3.66s) also drifted down in the hoisted
@@ -767,7 +801,7 @@ table.data tr:last-child td{border-bottom:none;}
     pure CPU with the GPU near idle, and the container has 16 cores and uses one. PyTorch says concurrent capture is
     forbidden &mdash; <span class="cite">graphs.py:419</span>, <em>"only one capture may be underway at a time in the
     process."</em> That comment is wrong, and the string that backs it belongs to an allocator backend this build
-    doesn't use. So it was worth measuring.</p>
+    doesn't use.</p>
 
     <div class="section-title">32 graphs of ~400 nodes, median of 5, every arm replayed and diffed against eager &middot; <a class="cite" href="scripts/cudagraph-concurrent-capture.py">scripts/cudagraph-concurrent-capture.py</a></div>
     <table class="data">
@@ -781,7 +815,7 @@ table.data tr:last-child td{border-bottom:none;}
     </table>
 
     <div class="grid3" style="margin-top:22px;">
-      <div class="card"><h3><span class="chip good">&#10003;</span> It genuinely works</h3><p><b>maxdiff = 0</b> on every
+      <div class="card"><h3><span class="chip good">&#10003;</span> It works</h3><p><b>maxdiff = 0</b> on every
       graph in every threaded arm &mdash; same kernels, same arguments. Overlap of 2.00/2.00 says the captures really
       were in flight simultaneously, not politely queueing. Needs
       <span class="cite">capture_error_mode="thread_local"</span> and one mempool per thread.</p></div>
@@ -821,10 +855,10 @@ table.data tr:last-child td{border-bottom:none;}
   <h2>Part 1 &middot; The solution space</h2>
   <h1>What each option spends to get its seconds back</h1>
   <div class="content">
-    <p class="lede">At 43.30s (TP=1), three phases are the story &mdash; weight load, CUDA graph capture, python imports.
-    Sorted by what each fix <em>spends</em>, not by how many seconds it saves. Of those three, weight load is now the
-    <em>closed</em> one: a load format measured after this slide was drafted takes it to within 1.5s of pure overhead, for
-    free. Capture and imports are what is left.</p>
+    <p class="lede">Three phases dominate TP=1 boot time: weight load, CUDA graph capture, python imports.
+    Sorted below by what each fix <em>spends</em>, not by how many seconds it saves. Weight load is the <em>closed</em>
+    one: the <span class="cite">instanttensor</span> load format takes it to within 1.5s of pure overhead, for free.
+    Capture and imports are what is left.</p>
 
     <div class="section-title">Adopted &mdash; costs nothing at runtime <span class="chip good" style="margin-left:8px;">&#10003; adopted</span></div>
     <div class="bar-list" id="adoptedbars"></div>
@@ -943,10 +977,9 @@ table.data tr:last-child td{border-bottom:none;}
       <p><span class="cite">torch.cuda.graph.__enter__</span> (<span class="cite">torch/cuda/graphs.py:437</span> in this
       build) device-syncs and calls
       <span class="cite">empty_cache()</span> before every capture, and vLLM builds <b>3366</b> of them. Moving both to
-      one call after <span class="cite">capture_model</span> is <b>&minus;4.0s of a 43s startup at +0.00 GiB</b>, and it
+      one call after <span class="cite">capture_model</span> is <b>&minus;4.18s at +0.00 GiB</b>, and it
       is a prerequisite for concurrent capture rather than a competitor to it. Whether the fix belongs in torch (make the
-      prologue optional) or vLLM (stop using the context manager for bulk capture) is the open question &mdash; not the
-      number. Not filed yet.</p></div>
+      prologue optional) or vLLM (stop using the context manager for bulk capture) is the open question. Not filed yet.</p></div>
       <div class="check-card"><div class="head"><h4>v2's graph-pool memory is unbudgeted</h4><span class="chip serious">bug</span></div>
       <p><span class="cite">profile_cudagraph_memory()</span> is real on the legacy v1 runner and
       <span class="cite">return 0</span> on v2 (<span class="cite">model_runner.py:843</span>, called from
@@ -1069,7 +1102,7 @@ table.data tr:last-child td{border-bottom:none;}
     <div class="section-title" style="margin-top:22px;">Parked-image weight, if you had to write it to disk (TP=1 only)</div>
     <div class="grid2">
       <div class="card"><h3>Level 1 &mdash; 75.67 GiB</h3><p>~90s just to read at this filesystem's 859 MB/s &mdash;
-      slower than the 43.3s cold boot it would replace. Non-starter.</p></div>
+      slower than the 36.87s cold boot it would replace. Non-starter.</p></div>
       <div class="card"><h3>Level 2 &mdash; 6.61 GiB</h3><p>~7.9s cold, ~0s warm &mdash; arithmetically interesting, but
       needs a weight-reload path that as shipped crashes the engine (next slide).</p></div>
     </div>
@@ -1113,13 +1146,14 @@ table.data tr:last-child td{border-bottom:none;}
       <div class="arrow">&rarr;</div>
       <div class="step" style="background:color-mix(in srgb, var(--good) 10%, var(--card)); border-color:color-mix(in srgb, var(--good) 40%, var(--border));"><div class="t">SIGKILL tree</div><div class="v">0 MiB, clean</div></div>
     </div>
-    <div class="gap-box"><b>This was first read live as a rank-to-rank mutual deadlock. That reading was wrong</b> &mdash;
-    an isolating matrix (<a class="cite" href="scripts/cuda-checkpoint-ipc-matrix.py">scripts/cuda-checkpoint-ipc-matrix.py</a>, two spawned children, no
-    vLLM involved) disproves it: checkpointing both ranks <em>simultaneously</em> hangs identically to one-at-a-time,
-    and a single child holding a live NCCL communicator or torch symmetric memory hangs completely alone. The
+    <div class="gap-box"><b>Not a rank-to-rank deadlock</b> &mdash; an isolating matrix
+    (<a class="cite" href="scripts/cuda-checkpoint-ipc-matrix.py">scripts/cuda-checkpoint-ipc-matrix.py</a>, two spawned children, no
+    vLLM involved) shows a single child holding a live NCCL communicator or torch symmetric memory hangs completely
+    alone, and checkpointing both ranks <em>simultaneously</em> hangs identically to one-at-a-time. The
     <span class="cite">futex_wait_queue</span> in <span class="cite">wchan</span> is the driver's per-process
-    checkpoint lock being wedged, not ranks waiting on each other. <a class="cite" href="https://github.com/vllm-project/vllm/blob/v0.28.0/vllm/distributed/device_communicators/cuda_communicator.py#L588-L589">checkpoint_prepare</a> also
-    doesn't tear down NCCL as first reported &mdash; it only releases FlashInfer's own workspaces; the stock
+    checkpoint lock being wedged, not ranks waiting on each other.
+    <a class="cite" href="https://github.com/vllm-project/vllm/blob/v0.28.0/vllm/distributed/device_communicators/cuda_communicator.py#L588-L589">checkpoint_prepare</a>
+    also doesn't tear down NCCL &mdash; it only releases FlashInfer's own workspaces; the stock
     <span class="cite">['CUSTOM','SYMM_MEM','PYNCCL']</span> chain builds <span class="cite">pynccl_comm</span>
     unconditionally and none of it gets released, which is why 0.06s reads as success having freed nothing.</div>
 
@@ -1180,7 +1214,7 @@ table.data tr:last-child td{border-bottom:none;}
       <tr><td>vLLM TP=1 engine, <span class="cite">fork</span></td><td class="strong">11 + 44</td><td class="strong" style="color:var(--critical)">rc=1, 34.20s</td><td>fd 9 = <span class="cite">/dev/nvidiactl</span>, inherited across the fork boundary</td></tr>
       <tr><td>vLLM TP=1 engine, <span class="cite">spawn</span></td><td class="strong">11 + 38</td><td class="strong" style="color:var(--good)">rc=0, 49.46s</td><td>EngineCore opens its own fds instead of inheriting</td></tr>
     </table>
-    <div class="gap-box"><b>Root cause, not a shrug:</b> <span class="cite">cuda-checkpoint</span> moved every byte off
+    <div class="gap-box"><b>Root cause:</b> <span class="cite">cuda-checkpoint</span> moved every byte off
     the device in both fork arms &mdash; 22.3s at 2.4 GiB/s, reporting <span class="cite">state=checkpointed</span>.
     criu's plugin then refuses fd 9 because EngineCore under <span class="cite">VLLM_WORKER_MULTIPROC_METHOD=fork</span>
     <em>inherits</em> that descriptor rather than opening it, and a plugin hook can only claim a descriptor its own
@@ -1353,11 +1387,11 @@ table.data tr:last-child td{border-bottom:none;}
   <div class="content">
     <div class="check-grid">
       <div class="check-card"><div class="head"><h4><span class="cite">PyNcclCommunicator</span> has no stable-VA detach</h4><span class="chip critical">TP=2 &middot; blocked</span></div>
-      <p>Root-caused, not just found: parking a TP&gt;1 engine to 0 MiB requires releasing live NCCL/symmetric-memory
+      <p>Parking a TP&gt;1 engine to 0 MiB requires releasing live NCCL/symmetric-memory
       state, which requires destroying the captured CUDA graphs first &mdash; the thing sleep level 1 exists to keep.
       FlashInfer already ships the stable-VA detach this needs (<a class="cite" href="https://github.com/flashinfer-ai/flashinfer/blob/v0.6.16.post3/flashinfer/comm/allreduce.py#L204">allreduce.py:204</a>); extending
       it to <span class="cite">PyNcclCommunicator</span>, or making <a class="cite" href="https://github.com/vllm-project/vllm/blob/v0.28.0/vllm/distributed/device_communicators/cuda_communicator.py#L588-L589">checkpoint_prepare</a> fail
-      loudly instead of reporting false success, is the precise upstream ask. Not filed yet.</p></div>
+      loudly instead of reporting false success, is the upstream ask. Not filed yet.</p></div>
 
       <div class="check-card"><div class="head"><h4><span class="cite">reload_weights</span> crashes the engine</h4><span class="chip serious">bug</span></div>
       <p>Wiring up vLLM's own <span class="cite">Worker.reload_weights()</span> after a level-2 wake doesn't fix the
@@ -1395,17 +1429,15 @@ table.data tr:last-child td{border-bottom:none;}
   <h2>Closing</h2>
   <h1>What's measured, what's real, and what's next</h1>
   <div class="content">
-    <p class="lede">TP=1 on one H100 is a controlled, median-of-3, phase-broken-down story: 90.65s &rarr; 43.30s (&minus;52%)
-    on a warm model-registry cache, or <b>93.6s &rarr; 50.0s (&minus;47%)</b> on a genuine first boot &mdash; and the last
-    phase to go unaccounted, the 14.95s registry subprocess, is now a row in the table rather than a silent assumption,
-    with every remaining second in the 43.30s accounted for. <b>TP=2 boot now is one too</b>: the same seven arms on
-    two H100s, 21 runs, 94.7s &rarr; 52.7s (&minus;44%) &mdash; and the two levers that die there are root-caused, not
-    shrugged at. <b>One phase that was written down as a ceiling turned out not to be one</b>: six of vLLM's nine load
-    formats run in this image, and a matched ladder across the three that work takes weight load from 13.69s to 7.70s
-    &mdash; <b>&minus;5.97s end to end, with no patch, no configuration and no second copy of the weights</b>, which also
-    retires the one monkey-patch in the adopted set. What is still a single live sample at TP=2 is Part 2 &mdash; which is also where the one finding sits
-    that no amount of further measurement will tune away: parking to 0 MiB and keeping the captured CUDA graphs are
-    mutually exclusive on this stack, with a precise upstream ask now written down instead of a "deadlock" label.</p>
+    <p class="lede">Current best on one H100, TP=1: <b>90.65s &rarr; 36.87s (&minus;59%)</b>, <span class="cite">instanttensor</span>
+    load format, no patch, warm model-registry cache. Every phase in that 36.87s is accounted for, including the
+    14.95s registry subprocess. On two H100s, TP=2: <b>94.7s &rarr; 53.52s (&minus;43%)</b>, same load format, phases
+    broken down across 21 runs. Weight load is the phase that moved: a matched ladder across the three working load
+    formats (of vLLM's nine) takes it from 13.69s to 7.70s &mdash; <b>&minus;5.97s, no configuration and no second copy of
+    the weights</b> &mdash; and adopting it also retires the one monkey-patch the deck previously depended on. TP=2 is
+    still a single live sample in Part 2, where one finding won't move with more measurement: parking to 0 MiB and
+    keeping the captured CUDA graphs are mutually exclusive on this stack. That is now a specific upstream ask, not a
+    "deadlock" label.</p>
 
     <div class="section-title">Eight experiments that would close the gap &mdash; one measured, one root-caused, one half, five still open</div>
     <table class="data">
@@ -1439,7 +1471,7 @@ table.data tr:last-child td{border-bottom:none;}
   <div class="part-tag" id="parttag">Part 1</div>
   <div class="dots" id="dots"></div>
   <div class="navbtns">
-    <span class="counter" id="counter">1 / 16</span>
+    <span class="counter" id="counter">1 / 25</span>
     <button id="prevBtn" aria-label="previous">&larr;</button>
     <button id="nextBtn" aria-label="next">&rarr;</button>
   </div>
@@ -1477,7 +1509,7 @@ table.data tr:last-child td{border-bottom:none;}
   var counter = document.getElementById('counter');
   var partTag = document.getElementById('parttag');
 
-  function goTo(i){
+  function goTo(i, opts){
     if (i<0 || i>=slides.length) return;
     slides[current].classList.remove('active');
     dots[current].classList.remove('active');
@@ -1489,6 +1521,18 @@ table.data tr:last-child td{border-bottom:none;}
     counter.textContent = (current+1) + ' / ' + slides.length;
     partTag.textContent = slides[current].__part === 2 ? 'Part 2' : (slides[current].__part===1 ? 'Part 1' : '');
     slides[current].scrollTop = 0;
+    if (!opts || !opts.fromHash) {
+      var hash = '#' + (current+1);
+      if (location.hash !== hash) {
+        history.replaceState(null, '', hash);
+      }
+    }
+  }
+
+  function slideFromHash(){
+    var n = parseInt(location.hash.slice(1), 10);
+    if (isNaN(n)) return -1;
+    return n - 1;
   }
 
   prevBtn.addEventListener('click', function(){ goTo(current-1); });
@@ -1499,7 +1543,13 @@ table.data tr:last-child td{border-bottom:none;}
     else if (e.key==='Home') { goTo(0); }
     else if (e.key==='End') { goTo(slides.length-1); }
   });
-  goTo(0);
+  window.addEventListener('hashchange', function(){
+    var i = slideFromHash();
+    if (i>=0 && i<slides.length && i!==current) goTo(i, {fromHash:true});
+  });
+
+  var initial = slideFromHash();
+  goTo(initial>=0 && initial<slides.length ? initial : 0);
 
   /* ---------- tooltip ---------- */
   var tip = document.getElementById('tooltip');
@@ -1598,7 +1648,7 @@ table.data tr:last-child td{border-bottom:none;}
   var cacheData = {
     cold: [
       {label:'Bytecode cache (imports)', sub:'<br>spawn, no PYTHONPYCACHEPREFIX', val:'37.6s', pct:100, tip:'Ladder step 1 baseline — 37.6s of python imports, 9.73s of it bytecode-compiling vLLM’s 6781-file import graph on every boot.'},
-      {label:'Model weight load', sub:'<br>default loader, cold page cache', val:'~62s', pct:100, tip:'A genuinely cold read of this 61.02 GiB model against the default loader. The discarded warm-up cycle showed 63.4s.'},
+      {label:'Model weight load', sub:'<br>default loader, cold page cache', val:'~62s', pct:100, tip:'A cold-page-cache read of this 61.02 GiB model against the default loader. The discarded warm-up cycle showed 63.4s.'},
       {label:'Startup plan (memory profiling)', sub:'<br>Qwen2.5-1.5B illustration, not 32B', val:'2.01s', pct:100, tip:'determine_memory phase, no persisted startup_plan.json fingerprint match. One pair, not a median — treat as order-of-magnitude. docs/kubernetes.md'},
       {label:'Model registry (modelinfos)', sub:'<br>empty $VLLM_CACHE_ROOT/modelinfos', val:'14.95s', pct:100, tip:'vLLM asks what the model class supports by importing the model module in a throwaway subprocess (python -m vllm.model_executor.models.registry), which pays a full import vllm to bring back a handful of booleans. Median of 5 in-pod. reports/registry-cache-cold-vs-warm-*.txt'}
     ],
