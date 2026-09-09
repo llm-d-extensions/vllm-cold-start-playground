@@ -1146,6 +1146,159 @@ table.data tr:last-child td{border-bottom:none;}
   </div>
 </section>
 
+<!-- Slide 13c: CRIU x cuda-checkpoint, full-engine checkpoint -->
+<section class="slide">
+  <h2>Part 2 &middot; Full-engine checkpoint</h2>
+  <h1>CRIU + cuda-checkpoint round-trips a live engine &mdash; but only by giving up fork</h1>
+  <div class="content">
+    <p class="lede">Run from a dedicated, privileged, <span class="cite">CAP_SYS_ADMIN</span> pod &mdash;
+    <a class="cite" href="manifests/pod-exec-criu.yaml">manifests/pod-exec-criu.yaml</a>, different from every other
+    pod in this deck. The question: instead of vLLM's own <span class="cite">/sleep</span> + <span class="cite">cuda-checkpoint</span>
+    from the previous slide, can the parked state be written to disk with CRIU, so a replica restores from an image
+    instead of booting cold. <a class="cite" href="reports/criu-cuda-checkpoint.txt">reports/criu-cuda-checkpoint.txt</a>.</p>
+
+    <div class="tp-row">
+      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">TP=1 restore &rarr; health_200</span><span class="val">37.69s</span><span class="unit">vs 58.0s baseline median &middot; &minus;20s, &minus;35% &middot; requires <span class="cite">spawn</span></span></div>
+      <div class="tp-badge tp2"><span class="dot"></span><span class="lbl">TP=2 checkpoint</span><span class="val" style="color:var(--critical)">wedges</span><span class="unit"><span class="cite">cuda-checkpoint</span> hangs on the NCCL-holding ranks &middot; nothing downstream reachable</span></div>
+      <div class="tp-badge gap"><span class="dot"></span><span class="lbl">fork vs criu</span><span class="val">mutually exclusive</span><span class="unit">a criu-restored process already has CUDA initialized</span></div>
+    </div>
+
+    <div class="section-title">Without <span class="cite">cuda-checkpoint</span>, criu cannot serialize a CUDA process at all &mdash; the distro criu package ships no CUDA plugin; this one was built from source</div>
+    <table class="data">
+      <tr><th>arm, small CUDA probe (2773 MiB device, 36 <span class="cite">/dev/nvidia*</span> fds)</th><th>criu dump</th><th>criu restore</th><th>graph replay</th></tr>
+      <tr><td><span class="cite">cuda-checkpoint</span> on <span class="cite">$PATH</span> (plugin active)</td><td class="strong" style="color:var(--good)">rc=0, 3.16s</td><td class="strong" style="color:var(--good)">rc=0, 2.68s</td><td class="strong" style="color:var(--good)">identical</td></tr>
+      <tr><td><span class="cite">cuda-checkpoint</span> hidden from <span class="cite">$PATH</span></td><td class="strong" style="color:var(--critical)">rc=1, 0.12s &mdash; ENOENT</td><td>&mdash;</td><td>&mdash;</td></tr>
+    </table>
+    <small class="note">The ENOENT reads as &quot;criu can't touch CUDA.&quot; It means a hook had nobody to call &mdash;
+    with the plugin present, criu drives the whole handshake unattended: device memory off via
+    <span class="cite">cuda-checkpoint</span>, image written, device memory back.</small>
+
+    <div class="section-title" style="margin-top:22px;">On real vLLM the plugin does the entire job &mdash; and the dump is still refused, at <span class="cite">fork</span></div>
+    <table class="data">
+      <tr><th>process</th><th><span class="cite">/dev/nvidia*</span> fds</th><th>plugin dump</th><th>why</th></tr>
+      <tr><td>small CUDA probe</td><td class="strong">36</td><td class="strong" style="color:var(--good)">rc=0, 3.16s</td><td>all fds opened by the process itself</td></tr>
+      <tr><td>vLLM TP=1 engine, <span class="cite">fork</span></td><td class="strong">11 + 44</td><td class="strong" style="color:var(--critical)">rc=1, 34.20s</td><td>fd 9 = <span class="cite">/dev/nvidiactl</span>, inherited across the fork boundary</td></tr>
+      <tr><td>vLLM TP=1 engine, <span class="cite">spawn</span></td><td class="strong">11 + 38</td><td class="strong" style="color:var(--good)">rc=0, 49.46s</td><td>EngineCore opens its own fds instead of inheriting</td></tr>
+    </table>
+    <div class="gap-box"><b>Root cause, not a shrug:</b> <span class="cite">cuda-checkpoint</span> moved every byte off
+    the device in both fork arms &mdash; 22.3s at 2.4 GiB/s, reporting <span class="cite">state=checkpointed</span>.
+    criu's plugin then refuses fd 9 because EngineCore under <span class="cite">VLLM_WORKER_MULTIPROC_METHOD=fork</span>
+    <em>inherits</em> that descriptor rather than opening it, and a plugin hook can only claim a descriptor its own
+    process opened. NVML was tested and ruled out first &mdash; a process holding <span class="cite">/dev/nvidiactl</span>
+    via NVML alone dumps fine, rc=0, so this isn't an NVML lock. Switching to <span class="cite">spawn</span> makes
+    EngineCore open its own fds, and the dump succeeds.</div>
+
+    <div class="section-title" style="margin-top:22px;">The round trip that works &mdash; one env var changed, no manual <span class="cite">cuda-checkpoint</span> call</div>
+    <div class="steps">
+      <div class="step"><div class="t">boot</div><div class="v">61.38s</div></div>
+      <div class="arrow">&rarr;</div>
+      <div class="step"><div class="t">criu dump</div><div class="v">49.46s, 76.02 GiB</div></div>
+      <div class="arrow">&rarr;</div>
+      <div class="step"><div class="t">restore, cache cold</div><div class="v">37.61s</div></div>
+      <div class="arrow">=</div>
+      <div class="step" style="background:color-mix(in srgb, var(--good) 10%, var(--card)); border-color:color-mix(in srgb, var(--good) 40%, var(--border));"><div class="t">health_200</div><div class="v">37.69s</div></div>
+    </div>
+    <table class="data" style="margin-top:10px;">
+      <tr><th>route</th><th>time</th></tr>
+      <tr><td><span class="cite">fork</span>, ordinary boot (harness baseline)</td><td class="strong">58.0s &middot; criu: dump refused</td></tr>
+      <tr><td><span class="cite">spawn</span>, ordinary boot</td><td class="strong">61.4s</td></tr>
+      <tr><td><span class="cite">spawn</span>, criu restore</td><td class="strong" style="color:var(--good)">37.7s</td></tr>
+    </table>
+    <div class="gap-box" style="border-style:solid;"><b>The transferable finding is the trade, not the 20s:</b> Part 1
+    turns <span class="cite">fork</span> on to save 15.5s of worker re-imports on every ordinary boot. A criu-restored
+    process already has CUDA initialized, so vLLM force-overrides it back to <span class="cite">spawn</span> &mdash;
+    the same veto TP=2 hits on the fork slide, arriving from the opposite direction. Fork's import shortcut on every
+    boot, or the checkpoint win on restores &mdash; not both.</div>
+
+    <div class="grid2" style="margin-top:20px;">
+      <div class="card" style="border-color:color-mix(in srgb, var(--serious) 45%, var(--border));"><h3><span class="chip serious">&#9888;</span> Single-use as produced</h3><p>Dumping a warmed engine needs
+      <span class="cite">--link-remap</span> for a <span class="cite">/dev/shm</span> semaphore vLLM unlinks while
+      still mapped &mdash; criu refuses the dump without it. That flag couples the image to state left behind at dump
+      time, so restoring the <em>same</em> image twice fails in 0.19s. Removing the flag doesn't turn this into a
+      tuning knob &mdash; criu just refuses the dump outright instead.</p></div>
+      <div class="card" style="border-color:color-mix(in srgb, var(--critical) 45%, var(--border));"><h3><span class="chip critical">&#10007;</span> TP=2 is closed, not slow</h3><p>Root and EngineCore, holding no NCCL
+      state, checkpoint in 0.05&ndash;0.09s. Both TP workers hang &gt;120s on <span class="cite">do_poll</span> &mdash;
+      the same NCCL/graph mutual exclusion the previous slide found inside vLLM's own <span class="cite">/sleep</span>,
+      now one layer lower, inside <span class="cite">cuda-checkpoint</span> itself. Also: 384Gi of host RAM per pod
+      &mdash; GPU memory becomes RSS roughly 1:1, and TP=2 would need ~144 GiB before criu writes a byte.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- Slide 13d: CRIU import-warm image -->
+<section class="slide">
+  <h2>Part 2 &middot; The alternative that survives</h2>
+  <h1>A smaller CRIU image that skips imports, not the engine &mdash; now shown portable</h1>
+  <div class="content">
+    <p class="lede">The full-engine image is 76 GiB, single-use, and needs 384Gi of RAM just to build. The other
+    product is much smaller: dump a Python process that finished importing torch and vLLM but never built an engine,
+    then restore it and let it become <span class="cite">vllm serve</span>. <a class="cite" href="scripts/criu-preboot.sh">scripts/criu-preboot.sh</a>.</p>
+
+    <div class="tp-row">
+      <div class="tp-badge tp1"><span class="dot"></span><span class="lbl">TP=1 win, --stage server</span><span class="val">4.07s</span><span class="unit">7.4% &middot; restore 50.65s mean vs cold 54.72s mean, n=2 &middot; accounting closes to 0.13s</span></div>
+      <div class="tp-badge tp2"><span class="dot"></span><span class="lbl">TP=2 win</span><span class="val">2.56s</span><span class="unit">4.6% &middot; n=1, not yet repeated</span></div>
+      <div class="tp-badge gap"><span class="dot"></span><span class="lbl">cross-pod, cross-node restore</span><span class="val">3/3</span><span class="unit">producer pod deleted &middot; different node &middot; win ~4.45s there</span></div>
+    </div>
+
+    <div class="section-title">Two builds of the same idea &mdash; only one survives its own arithmetic</div>
+    <table class="data">
+      <tr><th>stage</th><th>image</th><th>build</th><th>TP=1 restore vs cold</th><th>TP=1 win</th><th>TP=2 restore vs cold</th><th>TP=2 win</th></tr>
+      <tr><td><span class="cite">--stage vllm</span> &mdash; device-free (only <span class="cite">import torch</span> + <span class="cite">import vllm</span>)</td><td>0.42 GiB</td><td>3.02s</td><td>53.5&ndash;54.8s vs 57.1s</td><td>2.3&ndash;3.6s as first read, <b style="color:var(--serious)">~0.8s by its own bound</b></td><td>54.70s vs 56.16s</td><td>1.46s, n=1 &mdash; not separable from noise</td></tr>
+      <tr style="background:color-mix(in srgb, var(--good) 9%, transparent);"><td><b><span class="cite">--stage server</span> &mdash; adopted</b>, adds <span class="cite">vllm.entrypoints.openai.api_server</span></td><td><b>0.59 GiB</b></td><td><b>3.63s</b></td><td><b>50.65s mean vs 54.72s mean</b></td><td><b style="color:var(--good)">4.07s</b></td><td><b>52.81s vs 55.37s</b></td><td><b style="color:var(--good)">2.56s</b></td></tr>
+    </table>
+    <small class="note">The device-free row's win does not survive its own arithmetic: it carries 2.67s of imports and
+    spends 1.87s restoring them, so the most it can return is 0.80s &mdash; and the first reading over-ran that bound
+    3&ndash;4&times;, because a later session's cold control ran 2.4s faster on an unchanged config. The
+    <span class="cite">--stage server</span> row carries 6.25s and spends 2.31s, bound 3.94s, measured 4.07s &mdash;
+    inside its own bound to 0.13s.</small>
+
+    <div class="gap-box" style="margin-top:14px;"><b>The prize and the price are the same import.</b> Isolating the
+    four modules one at a time: <span class="cite">vllm.entrypoints.openai.api_server</span> alone is <b>+3.50s</b>
+    and takes <span class="cite">/dev/nvidia*</span> fds from 0 to 11 &mdash; that's the whole cost, and it's also
+    what reaches CUDA at all. The other three modules this stage adds (<span class="cite">vllm.entrypoints.cli.main</span>,
+    <span class="cite">AsyncEngineArgs</span>, uvicorn/fastapi) cost +0.00s; they're already pulled in by that one.
+    There's no cheaper subset to prefetch &mdash; the same import that lifts the win from ~0.8s to 4.1s is the one
+    that drags in <span class="cite">cuda_plugin.so</span>, <span class="cite">cuda-checkpoint</span>, and a
+    privileged pod.</div>
+
+    <div class="section-title" style="margin-top:22px;">Reusable where the full-engine image was not &mdash; and, as of 2026-09-08, shown portable across pods and nodes</div>
+    <div class="check-grid">
+      <div class="check-card" style="border-color:color-mix(in srgb, var(--good) 45%, var(--border));"><div class="head"><h4>One dump, three restores, two topologies</h4><span class="chip good">&#10003; reusable</span></div>
+      <p>No <span class="cite">/dev/shm</span> coupling &mdash; this dump happens before the engine exists, so the
+      full-engine route's <span class="cite">--link-remap</span> problem doesn't arise. The same 0.59 GiB image
+      served TP=1 twice and TP=2 once from one build, zero rebuilds, topology chosen after restore.</p></div>
+      <div class="check-card" style="border-color:color-mix(in srgb, var(--good) 45%, var(--border));"><div class="head"><h4>Cross-pod, cross-node: 3/3, after fixing our own bug</h4><span class="chip good">&#10003; portable</span></div>
+      <p>Image rebuilt onto a shared PVC (+0.15s, +7.4% vs node-local nvme), producer pod deleted, a fresh pod on a
+      <em>different node</em> restored it 3/3, correct output every time. First three attempts failed hard on a
+      <span class="cite">libblkid.so</span> build-ID mismatch &mdash; not a mount-identity limit, criu's build-ID check
+      is a pure content compare that never looks at <span class="cite">st_dev</span>/<span class="cite">st_ino</span>.
+      The real cause: this repo's own setup script apt-installs the toolchain at pod runtime, and apt pulled
+      <span class="cite">libblkid1</span> forward in one pod's writable layer while the other, hitting a cache, stayed
+      behind &mdash; same image digest, different library on disk. Matching versions reproduced the exact build-ID
+      and restore succeeded 3/3. <a class="cite" href="scripts/criu-setup.sh">scripts/criu-setup.sh</a>.</p></div>
+      <div class="check-card"><div class="head"><h4>Quote the win as ~4s, not to three figures</h4><span class="chip warn">precision limit</span></div>
+      <p>4.07s here and 4.45s in the cross-pod session are the same effect measured twice, but the run-to-run spread
+      on a shared node (0.42&ndash;2.27s) is comparable to the effect itself. Per-arm it straddles its own bound
+      rather than closing exactly &mdash; one arm lands 0.64s over, attributed to 1-second log-timestamp resolution.</p></div>
+      <div class="check-card"><div class="head"><h4>Driver/kernel skew: untestable here</h4><span class="chip warn">gap</span></div>
+      <p>Every node behind this test ran the same driver and kernel, so cross-pod portability is shown only across a
+      homogeneous fleet. A heterogeneous one is the gap that replaced the original single-node question. Also open:
+      whether the 76 GiB full-engine image is portable at all (a different blocker than build-ID), and TP=2
+      <span class="cite">--stage server</span> beyond n=1.</p></div>
+    </div>
+
+    <div class="gap-box" style="border-style:solid; margin-top:14px;"><b>Recommendation:</b> do not adopt the
+    full-engine checkpoint for cold start &mdash; not because it's slow, but because of what keeping it costs
+    (give up <span class="cite">fork</span>'s 15.5s, 384Gi RAM/replica, 76 GiB/model-and-flag combination, single-use
+    images, TP&gt;1 closed outright). Do adopt the import-warm image at <span class="cite">--stage server</span>, with
+    eyes open about its ceiling: the win is exactly (imports carried) minus (restore cost), already sitting at that
+    bound &mdash; growing it means carrying the next import, which is engine construction, i.e. recommendation one's
+    route and all its costs. If a checkpoint is wanted for warm standby rather than cold start, the TP=1
+    full-engine result is real and priceable as a different product: 384Gi resident per parked replica, ~20s saved.
+    <a class="cite" href="reports/criu-cuda-checkpoint.txt">Full report and evidence index</a>.</div>
+  </div>
+</section>
+
 <!-- Slide 13b: Launcher-fronted boot vs. a tuned standalone -->
 <section class="slide">
   <h2>Part 2 &middot; The actuation launcher</h2>
@@ -1224,9 +1377,11 @@ table.data tr:last-child td{border-bottom:none;}
       <p><span class="cite">--device-map</span> restore requires the pod to see every candidate GPU up front, which
       makes the scheduler's per-GPU accounting fiction. Untested at TP&gt;1, and moot until the stable-VA-detach trade above resolves.</p></div>
 
-      <div class="check-card"><div class="head"><h4>No snapshot format exists to serialize</h4><span class="chip critical">closed, not missing</span></div>
-      <p><span class="cite">cuda-checkpoint</span>'s interface is pid-keyed with no output path &mdash; not a flag away
-      from "save to disk." CRIU is the only route that could, and it isn't in this image (no <span class="cite">CAP_SYS_ADMIN</span>).</p></div>
+      <div class="check-card"><div class="head"><h4>A snapshot format exists after all &mdash; only from a privileged pod</h4><span class="chip warn">tried, still closed here</span></div>
+      <p><span class="cite">cuda-checkpoint</span>'s own interface is pid-keyed with no output path. CRIU plus a
+      CUDA plugin built from source does write an image to disk &mdash; but only from a dedicated,
+      <span class="cite">CAP_SYS_ADMIN</span> pod, which neither <span class="cite">pod-exec.yaml</span> nor
+      <span class="cite">pod-serve.yaml</span> is. Two slides on what that buys and what it costs.</p></div>
 
       <div class="check-card"><div class="head"><h4><span class="cite">/dev/shm</span> 64 MiB default</h4><span class="chip warn">landmine</span></div>
       <p>Kubernetes' default <span class="cite">emptyDir</span> size is a classic silent TP&gt;1 startup stall for
