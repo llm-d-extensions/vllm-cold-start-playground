@@ -1524,7 +1524,7 @@ table.data tr:last-child td{border-bottom:none;}
     if (!opts || !opts.fromHash) {
       var hash = '#' + (current+1);
       if (location.hash !== hash) {
-        history.replaceState(null, '', hash);
+        try { history.replaceState(null, '', hash); } catch (e) { /* sandboxed iframe (e.g. htmlpreview) denies history API */ }
       }
     }
   }
