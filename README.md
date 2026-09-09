@@ -1,4 +1,4 @@
-# llm-d cold start: vLLM startup measurement
+# vLLM startup measurement
 
 Tooling to answer one question precisely: **where does the time go between the
 moment a vLLM process is exec'd and the moment its API server can actually
